@@ -7,3 +7,6 @@ authors = ["Sam Delmerico <svdelmerico@gmail.com>"]
 hyper           = "0.9.6"
 mime            = "0.2.0"
 rustc-serialize = "0.3.19"
+
+[dependencies.trie]
+path = "src/rust-trie"

@@ -1,0 +1,6 @@
+[submodule "rust-trie"]
+	path = rust-trie
+	url = https://github.com/stnma7e/rust-trie
+[submodule "src/rust-trie"]
+	path = src/rust-trie
+	url = https://github.com/stnma7e/rust-trie

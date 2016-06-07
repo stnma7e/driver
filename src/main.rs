@@ -1,12 +1,14 @@
 extern crate hyper;
 extern crate mime;
 extern crate rustc_serialize;
+extern crate trie;
 
 use hyper::{Client, Server, server};
 use hyper::header::{Host, ContentType, Authorization, Bearer, Range};
 use mime::{Mime, TopLevel, SubLevel};
-use rustc_serialize::json::{Json, ToJson};
-use rustc_serialize::json;
+use rustc_serialize::json::{Json, ToJson, Decoder};
+use rustc_serialize::{json, Decodable};
+use trie::Trie;
 
 use std::io::prelude::*;
 use std::io;
@@ -47,8 +49,30 @@ impl ToJson for TokenResponse {
     }
 }
 
+#[derive (RustcDecodable, Debug, Clone)]
+struct FileResponse {
+    kind: String,
+    id: String,
+    name: String,
+    mimeType: String,
+}
+
+impl ToJson for FileResponse {
+    fn to_json(&self) -> Json {
+        let mut d = BTreeMap::new();
+        // All standard types implement `to_json()`, so use it
+        d.insert("kind".to_string(),     self.kind.to_json());
+        d.insert("id".to_string(),       self.id.to_json());
+        d.insert("name".to_string(),     self.name.to_json());
+        d.insert("mimeType".to_string(), self.mimeType.to_json());
+        Json::Object(d)
+    }
+}
+
 fn main() {
     let c = Client::new();
+
+    let mut file_tree = Trie::<String, FileResponse>::new();
 
     let tr: TokenResponse = match File::open("access") {
         // access file exists, so we can just use the access code that's stored in the file
@@ -79,19 +103,42 @@ fn main() {
 
     //println!("{:?}", tr);
 
-    let mut resp = c.get("https://www.googleapis.com/drive/v3/files/?alt=media")
-                  .header(Authorization(Bearer{token: tr.access_token}))
-                  //.header(Range::bytes(0,500))
-                  .send()
-                  .unwrap();
-    let mut resp_bytes = Vec::<u8>::new();
+    {
+        let mut resp = c.get("https://www.googleapis.com/drive/v3/files/?alt=media")
+                      .header(Authorization(Bearer{token: tr.access_token.clone()}))
+                      //.header(Range::bytes(0,500))
+                      .send()
+                      .expect("adsf");
+        let mut resp_bytes = Vec::<u8>::new();
+        let mut resp_string = String::new();
+        resp.read_to_end(&mut resp_bytes);
+        resp.read_to_string(&mut resp_string);
+        println!("{:?}", resp);
+        println!("{}", resp_string);
+        let mut f = File::create("blah.jpg").unwrap();
+        f.write_all(&resp_bytes);
+    }
+
+    let mut resp = c.get("https://www.googleapis.com/drive/v3/files\
+                          ?corpus=domain\
+                          &orderBy=modifiedByMeTime\
+                          &pageSize=100\
+                          &q=%27root%27+in+parents")
+                          //&key={YOUR_API_KEY}")
+                      .header(Authorization(Bearer{token: tr.access_token}))
+                      .send()
+                      .unwrap();
     let mut resp_string = String::new();
-    resp.read_to_end(&mut resp_bytes);
     resp.read_to_string(&mut resp_string);
-    println!("{:?}", resp);
+    let fr_data = Json::from_str(&resp_string).unwrap();
+    let fr_obj  = fr_data.as_object().unwrap();
+    for i in (fr_obj.get("files").unwrap().as_array().unwrap()).iter() {
+        let mut decoder = Decoder::new(i.clone());
+        let fr: FileResponse = Decodable::decode(&mut decoder).unwrap();
+        file_tree.insert(vec!["root".to_string(), fr.id.clone()], fr);
+    }
     println!("{}", resp_string);
-    let mut f = File::create("blah.jpg").unwrap();
-    f.write_all(&resp_bytes);
+    println!("{:?}", file_tree);
 }
 
 fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
