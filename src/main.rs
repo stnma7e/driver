@@ -3,7 +3,7 @@ extern crate mime;
 extern crate rustc_serialize;
 
 use hyper::{Client, Server, server};
-use hyper::header::{Host, ContentType};
+use hyper::header::{Host, ContentType, Authorization, Bearer, Range};
 use mime::{Mime, TopLevel, SubLevel};
 use rustc_serialize::json::{Json, ToJson};
 use rustc_serialize::json;
@@ -55,6 +55,7 @@ fn main() {
         Ok(mut handle) => {
             let mut access_string = String::new();
             if let Ok(_) = handle.read_to_string(&mut access_string) {
+                println!("{}", access_string);
                 let tr: TokenResponse = json::decode(&access_string).unwrap();
                 tr
             } else {
@@ -66,8 +67,9 @@ fn main() {
         Err(error) => {
             match File::create("access") {
                 Ok(mut handle) => {
-                    let (tr, res_string) = request_new_access_code(&c);
-                    handle.write_all(res_string.as_bytes());
+                    let (tr, resp_string) = request_new_access_code(&c);
+                    println!("{}", resp_string);
+                    handle.write_all(resp_string.as_bytes());
                     tr
                 }
                 Err(error) => panic!("error when creating access file: {}", error),
@@ -75,7 +77,21 @@ fn main() {
         }
     };
 
-    println!("{:?}", tr);
+    //println!("{:?}", tr);
+
+    let mut resp = c.get("https://www.googleapis.com/drive/v3/files/?alt=media")
+                  .header(Authorization(Bearer{token: tr.access_token}))
+                  //.header(Range::bytes(0,500))
+                  .send()
+                  .unwrap();
+    let mut resp_bytes = Vec::<u8>::new();
+    let mut resp_string = String::new();
+    resp.read_to_end(&mut resp_bytes);
+    resp.read_to_string(&mut resp_string);
+    println!("{:?}", resp);
+    println!("{}", resp_string);
+    let mut f = File::create("blah.jpg").unwrap();
+    f.write_all(&resp_bytes);
 }
 
 fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
@@ -93,9 +109,9 @@ fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
         Err(error) => println!("error: {}", error),
     }
 
-    let mut res = c.post("https://accounts.google.com/o/oauth2/token")
+    let mut resp = c.post("https://accounts.google.com/o/oauth2/token")
         .header(ContentType(Mime(TopLevel::Application, SubLevel::WwwFormUrlEncoded, vec![])))
-        .header(Host{hostname: "www.googleapis.com".to_owned(), port: None})
+        //.header(Host{hostname: "www.googleapis.com".to_owned(), port: None})
         .body(&format!("code={}&\
                client_id=
                client_secret=
@@ -104,10 +120,10 @@ fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
             , code_string))
         .send()
         .unwrap();
-    print!("{}\n{}\n{}\n\n", res.url, res.status, res.headers);
+    print!("{}\n{}\n{}\n\n", resp.url, resp.status, resp.headers);
 
-    let mut res_string = String::new();
-    res.read_to_string(&mut res_string);
-    let tr: TokenResponse = json::decode(&res_string).unwrap();
-    (tr, res_string)
+    let mut resp_string = String::new();
+    resp.read_to_string(&mut resp_string);
+    let tr: TokenResponse = json::decode(&resp_string).unwrap();
+    (tr, resp_string)
 }
