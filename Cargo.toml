@@ -8,5 +8,9 @@ hyper           = "0.9.6"
 mime            = "0.2.0"
 rustc-serialize = "0.3.19"
 
+[dependencies.url]
+git = "https://github.com/servo/rust-url"
+
 [dependencies.trie]
+#git = "https://github.com/stnma7e/rust-trie"
 path = "src/rust-trie"

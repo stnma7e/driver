@@ -2,6 +2,7 @@ extern crate hyper;
 extern crate mime;
 extern crate rustc_serialize;
 extern crate trie;
+extern crate url;
 
 use hyper::{Client, Server, server};
 use hyper::header::{Host, ContentType, Authorization, Bearer, Range};
@@ -119,26 +120,38 @@ fn main() {
         f.write_all(&resp_bytes);
     }
 
-    let mut resp = c.get("https://www.googleapis.com/drive/v3/files\
+    get_files(&mut file_tree, &c, tr.access_token, (vec!["root".to_string()], "root".to_string()));
+    println!("{:?}", file_tree);
+    //println!("{:?}", file_tree.fetch)
+}
+
+fn get_files(file_tree: &mut Trie<String, FileResponse>, c: &Client, access_token: String, root_folder: (Vec<String>, String)) {
+    let mut resp = c.get(&format!("https://www.googleapis.com/drive/v3/files\
                           ?corpus=domain\
-                          &orderBy=modifiedByMeTime\
                           &pageSize=100\
-                          &q=%27root%27+in+parents")
-                          //&key={YOUR_API_KEY}")
-                      .header(Authorization(Bearer{token: tr.access_token}))
+                          &q=%27{}%27+in+parents",
+                          root_folder.1.clone()))
+                      .header(Authorization(Bearer{token: access_token.clone()}))
                       .send()
                       .unwrap();
     let mut resp_string = String::new();
     resp.read_to_string(&mut resp_string);
     let fr_data = Json::from_str(&resp_string).unwrap();
     let fr_obj  = fr_data.as_object().unwrap();
+    
+    //println!("{}", resp_string);
+
     for i in (fr_obj.get("files").unwrap().as_array().unwrap()).iter() {
         let mut decoder = Decoder::new(i.clone());
         let fr: FileResponse = Decodable::decode(&mut decoder).unwrap();
-        file_tree.insert(vec!["root".to_string(), fr.id.clone()], fr);
+        if fr.mimeType.clone() == "application/vnd.google-apps.folder" {
+            //println!("\n\n\ngetting the next directory's files, {}\n\n\n", fr.id.clone());
+            get_files(file_tree, c, access_token.clone(), (root_folder.0.clone(), fr.id.clone()));
+        }
+        let mut new_root_folder = root_folder.0.clone();
+        new_root_folder.push(fr.name.clone());
+        file_tree.insert(new_root_folder, fr);
     }
-    println!("{}", resp_string);
-    println!("{:?}", file_tree);
 }
 
 fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
