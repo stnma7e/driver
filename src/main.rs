@@ -9,14 +9,14 @@ extern crate crypto;
 use hyper::{Client, Server, server};
 use hyper::header::{Host, ContentType, Authorization, Bearer, Range};
 use mime::{Mime, TopLevel, SubLevel};
-use rustc_serialize::json::{Json, ToJson, Decoder};
+use rustc_serialize::json::{Json, ToJson, Decoder, as_pretty_json};
 use rustc_serialize::{json, Decodable};
 use trie::Trie;
 use itertools::Itertools;
 
 use std::io::prelude::*;
 use std::io;
-use std::fs::{File, DirBuilder};
+use std::fs::{File, DirBuilder, OpenOptions};
 use std::collections::BTreeMap;
 
 #[derive (RustcDecodable, Debug, Clone)]
@@ -43,7 +43,6 @@ impl TokenResponse {
 impl ToJson for TokenResponse {
     fn to_json(&self) -> Json {
         let mut d = BTreeMap::new();
-        // All standard types implement `to_json()`, so use it
         d.insert("access_token".to_string(),  self.access_token.to_json());
         d.insert("token_type".to_string(),    self.token_type.to_json());
         d.insert("expires_in".to_string(),    self.expires_in.to_json());
@@ -93,6 +92,8 @@ struct AuthData {
     tr: TokenResponse,
     client_id: String,
     client_secret: String,
+    // maybe this can be converted to a std::path::Path later?
+    cache_file_path: String,
 }
 
 struct FileTree {
@@ -104,9 +105,10 @@ struct FileTree {
 fn main() {
     let c = Client::new();
 
+    let cache_file = "access";
     let file_tree = Trie::<String, FileResponse>::new();
 
-    let tr: TokenResponse = match File::open("access") {
+    let tr: TokenResponse = match File::open(cache_file) {
         // access file exists, so we can just use the access code that's stored in the file
         Ok(mut handle) => {
             let mut access_string = String::new();
@@ -123,7 +125,7 @@ fn main() {
 
         // access file doesn't exist, so we need to poll the user for a new access code
         Err(error) => {
-            match File::create("access") {
+            match File::create(cache_file) {
                 Ok(mut handle) => {
                     let (tr, resp_string) = request_new_access_code(&c);
                     println!("{}", resp_string);
@@ -142,8 +144,9 @@ fn main() {
         client: Client::new(),
         auth_data: AuthData {
             tr: tr.clone(),
-            client_id: "460434421766-0sktb0rkbvbko8omj8vhu8vv83giraao.apps.googleusercontent.com".to_owned(),
-            client_secret: "m_ILEPtnZI53tXow9hoaabjm".to_owned(),
+            client_id: "".to_owned(),
+            client_secret: "".to_owned(),
+            cache_file_path: "access".to_owned(),
         },
     };
     ft.get_files((vec!["root".to_string()], "root".to_string()));
@@ -324,7 +327,7 @@ impl FileTree {
         };
     
         match err_obj.get("error") {
-            Some(error) => match error.as_object().unwrap().get("errors").unwrap().as_array() {
+            Some(error) => match error.as_object().expect("not an object").get("errors").expect("no array").as_array() {
                 Some(errors) => for i in errors {
                     let mut decoder = Decoder::new(i.clone());
                     let err: ErrorDetailsResponse = match Decodable::decode(&mut decoder) {
@@ -335,30 +338,55 @@ impl FileTree {
                     if err.reason   == "authError"           &&
                        err.message  == "Invalid Credentials" &&
                        err.location == "Authorization" {
-                        let mut resp = self.client.get(&format!("www.googleapis.com/oauth2/v3/token\
-                                                   &client_id={}\
-                                                   &client_secret={}\
-                                                   &refresh_token={}\
-                                                   &grant_type=refresh_token", self.auth_data.client_id, self.auth_data.client_secret, self.auth_data.tr.refresh_token))
-                                              .send()
-                                              .unwrap();
-                        println!("{:?}", resp);
+                        let resp = self.client.post("https://www.googleapis.com/oauth2/v3/token")
+                                              .header(ContentType(Mime(TopLevel::Application, SubLevel::WwwFormUrlEncoded, vec![])))
+                                              //.header(Host{hostname: "www.googleapis.com".to_owned(), port: None})
+                                              .body(&format!("&client_id={}\
+                                                    &client_secret={}\
+                                                    &refresh_token={}\
+                                                    &grant_type=refresh_token", self.auth_data.client_id, self.auth_data.client_secret, self.auth_data.tr.refresh_token))
+                                              .send();
+                        let mut resp = match resp {
+                            Ok(resp) => resp,
+                            Err(error) => panic!("{}", error)
+                        };
                         self.auth_data.tr.access_token = {
-                            let mut resp_string = String::new();
-                            resp.read_to_string(&mut resp_string);
-                            let ref_data = match Json::from_str(&resp_string) {
+                            let mut ref_string = String::new();
+                            resp.read_to_string(&mut ref_string);
+                            let ref_data = match Json::from_str(&ref_string) {
                                 Ok(fr) => fr,
                                 Err(error) => panic!("cannot read string as Json; invalid response, {}", error)
                             };
-                            let ref_obj  = match err_data.as_object() {
+                            let ref_obj  = match ref_data.as_object() {
                                 Some(fr) => fr,
                                 None => panic!("JSON data returned was not an objcet")
                             };
-                            ref_obj.get("access_token").unwrap().as_string().unwrap().to_owned()
-                        }
-                    }
+                            ref_obj.get("access_token").expect("afsd").as_string().unwrap().to_owned()
+                        };
+
+                        // we'll open our access_cache file to read its current contents
+                        let mut f = File::open(self.auth_data.cache_file_path.clone()).unwrap();
+                        let mut access_string = String::new();
+                        if let Ok(_) = f.read_to_string(&mut access_string) {
+
+                            // if the current access file reads as it should, we'll copy the
+                            // current token response and edit the access_token field for later use
+                            let mut tr: TokenResponse = match json::decode(&access_string) {
+                                Ok(tr) => tr,
+                                Err(error) => panic!()
+                            };
+                            tr.access_token = self.auth_data.tr.access_token.clone();
+                            let tr_json = tr.to_json();
+                            let tr_str = format!("{}", as_pretty_json(&tr_json));
+
+                            // then we'll truncate the file and paste in the updated token response
+                            // preserving all the other unused data
+                            let mut f = File::create(self.auth_data.cache_file_path.clone()).unwrap();
+                            f.write_all(tr_str.as_bytes());
+                        };
+                    };
                 },
-                None => panic!("the errors attribute was not a valid JSON array")
+                None => panic!("the response given to resolve_error() had no array of errors")
             },
             None => panic!("the response given to resolve_error() did not contain an error attribute")
         };
@@ -386,8 +414,8 @@ fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
         .header(ContentType(Mime(TopLevel::Application, SubLevel::WwwFormUrlEncoded, vec![])))
         //.header(Host{hostname: "www.googleapis.com".to_owned(), port: None})
         .body(&format!("code={}\
-               &client_id=
-               &client_secret=
+               &client_id=\
+               &client_secret=\
                &redirect_uri=urn:ietf:wg:oauth:2.0:oob\
                &grant_type=authorization_code"
                , code_string))
