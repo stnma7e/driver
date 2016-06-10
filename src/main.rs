@@ -6,18 +6,21 @@ extern crate url;
 extern crate itertools;
 extern crate crypto;
 
-use hyper::{Client, Server, server};
+use hyper::{Client, Server, client};
 use hyper::header::{Host, ContentType, Authorization, Bearer, Range};
 use mime::{Mime, TopLevel, SubLevel};
 use rustc_serialize::json::{Json, ToJson, Decoder, as_pretty_json};
 use rustc_serialize::{json, Decodable};
 use trie::Trie;
 use itertools::Itertools;
+use crypto::md5::Md5;
+use crypto::digest::Digest;
 
 use std::io::prelude::*;
 use std::io;
-use std::fs::{File, DirBuilder, OpenOptions};
+use std::fs::{File, DirBuilder, remove_file};
 use std::collections::BTreeMap;
+use std::error::Error;
 
 #[derive (RustcDecodable, Debug, Clone)]
 struct TokenResponse {
@@ -226,12 +229,10 @@ impl FileTree {
             let mut new_root_folder = root_folder.0.clone();
             // add the file we're working with to the path for the trie
             new_root_folder.push(fr.name.clone());
+            let new_path_str = convert_pathVec_to_pathString(new_root_folder.clone());
+            let metadata_path_str = convert_pathVec_to_metaData_pathStr(new_root_folder.clone());
+
             self.tree.insert(new_root_folder.clone(), fr.clone());
-    
-            // convert the path vector to a string for file/folder creation in the system filesystem
-            let new_path_str = new_root_folder.iter()
-                .intersperse(&"/".to_owned())
-                .fold("".to_owned(), |acc, ref filename| acc + &filename.clone());
     
             if fr.mimeType.clone() == "application/vnd.google-apps.folder" {
                 println!("getting the next directory's files, {}", new_path_str.clone());
@@ -241,75 +242,14 @@ impl FileTree {
                 self.get_files((new_root_folder.clone(), fr.id.clone()));
             } else {
             // we're working with a file, not a folder, so we need to save it to the system
-                println!("saving file, {}", new_path_str.clone() + "/" + &fr.name.clone());
-    
-                // try to open the file, if it already exists
-                match File::open(new_path_str.clone()) {
-                    Ok(f) => {
-                        //let mut maybe_resp = c.get(&format!("https://www.googleapis.com/drive/v3/files/{}\
-                                                            //?fields=md5Checksum%2Csize", fr.id.clone()))
-                                              //.header(Authorization(Bearer{token: access_token.clone()}))
-                                       //       //.header(Range::bytes(0,500))
-                                              //.send();
-                        //let mut resp = match maybe_resp {
-                            //Ok(resp) => resp,
-                            //Err(error) => {
-                                //println!("error when receiving response during file download, {}", error);
-                                //continue;
-                                //resolve_error(&resp_string);
-                            //}
-                        //};
-    
-                        //let mut resp_string = String::new();
-                        //let mut resp_bytes = Vec::<u8>::new();
-                        //resp.read_to_end(&mut resp_bytes);
-                        //resp.read_to_string(&mut resp_string);
-                        //println!("{}", resp_string);
-                        //let fcr: FileCheckResponse = json::decode(&resp_string).unwrap();
-                        //let dotf = match File::open(".".to_owned() + &new_path_str.clone()) {
-                            //Ok(dotf) => dotf,
-                            //Err(error) => File::create(".".to_owned() + &new_path_str.clone()).unwrap()
-                        //};
-    
-                        //let mut fc_string = String::new();
-                        //dotf.read_to_string(&mut fc_string);
-                        //match json::decode(&fc_string) {
-                            //Ok(fc) => {
-                                //if (fc as FileCheckResponse).md5Checksum != fcr.md5Checksum.clone() {
-                                    //println!("updating metadata for {}", new_path_str);
-                                //}
-                            //}
-                            //Err(error) => {
-                                //println!("reading the filecheck from {} failed, error: {:?}", new_path_str.clone(), error);
-                                //dotf.write_all(&resp_bytes);
-                            //}
-                        //};
-                    },
-                    // the file doesn't yet exist, so we need to download it
-                    Err(_) => {
-                        let mut f = File::create(new_path_str).unwrap();
-    
-                        let mut maybe_resp = self.client.get(&format!("https://www.googleapis.com/drive/v3/files/{}\
-                                                            ?alt=media"
-                                                    , fr.id.clone()))
-                                              .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
-                                              //.header(Range::bytes(0,500))
-                                              .send();
-                        let mut resp = match maybe_resp {
-                            Ok(resp) => resp,
-                            Err(error) => {
-                                println!("error when receiving response during file download, {}", error);
-                                continue
-                            }
-                        };
-                        let mut resp_bytes = Vec::<u8>::new();
-                        let mut resp_string = String::new();
-                        resp.read_to_end(&mut resp_bytes);
-                        resp.read_to_string(&mut resp_string);
-                        println!("{:?}", resp);
-                        println!("{}", resp_string);
-    
-                        f.write_all(&resp_bytes);
+                println!("saving file, {}", new_path_str.clone());
+                match self.download_and_save_file(new_root_folder.clone(), fr.clone()) {
+                    Ok(_) => (),
+                    Err(error) => {
+                        println!("error when saving or downloading file: {}", error);
+                        println!("deleting metadata, and trying a fresh save");
+                        remove_file(&metadata_path_str);
+                        self.download_and_save_file(new_root_folder, fr);
                     }
                 };
             }
@@ -319,7 +259,7 @@ impl FileTree {
     fn resolve_error(&mut self, resp_string: &String) -> io::Result<()> {
         let err_data = match Json::from_str(&resp_string) {
             Ok(fr) => fr,
-            Err(error) => panic!("cannot read string as Json; invalid response, {}", error)
+            Err(error) => panic!("cannot read string as Json; error: {}, invalid response: {}", error, resp_string)
         };
         let err_obj  = match err_data.as_object() {
             Some(fr) => fr,
@@ -393,6 +333,173 @@ impl FileTree {
     
         Ok(())
     }
+
+    fn download_and_save_file(&mut self, file_path: Vec<String>, fr: FileResponse) -> Result<(), String> {
+        let new_path_str = convert_pathVec_to_pathString(file_path.clone());
+        let metadata_path_str = convert_pathVec_to_metaData_pathStr(file_path.clone());
+
+        // try to open the metadata file, if it already exists
+        match File::open(metadata_path_str.clone()) {
+            Ok(mut dotf) => {
+                // if it does, we'll read the file to see if the checksum matches what we have on
+                // the server
+                match read_json_to_type(&mut dotf).1 as Result<FileCheckResponse, String> {
+                    Ok(fc) => {
+                        if !self.verify_file_checksum(fr.clone(), &fc.md5Checksum).0 {
+                            println!("updating metadata for {}", new_path_str);
+
+                            // if the checksum fails, we need to redownload it
+                            self.create_new_file(fr.clone(), file_path.clone());
+                        }
+                    }
+                    // if the file exists, but doesn't read (this should be an error), but we'll
+                    // checksum the file (if we have it) on the system, and compare it to the
+                    // server, if all is OK, create a new metadata file
+                    Err(error) => {
+                        println!("reading the filecheck from {} failed, error: {:?}", new_path_str.clone(), error);
+                        println!("creating new metadata file");
+                        let mut dotf = File::create(metadata_path_str.clone()).unwrap();
+                        // if the file exists, get the checksum
+                        if let Ok(current_file_checksum) = get_file_checksum(file_path.clone()) {
+                            let (equal, resp_string) = self.verify_file_checksum(fr.clone(), &current_file_checksum);
+                            // if the checksum matches that from Drive, then file is downloaded
+                            // correctly, and all we need to do is cache the checksum
+                            if equal {
+                                dotf.write_all(&resp_string.into_bytes());
+                            // the file's checksum doesn't match the server's, so we need to
+                            // re-download it
+                            } else {
+                                println!("checksum match failed, redownloading file {}", new_path_str);
+                                self.create_new_file(fr, file_path);
+                            }
+                        // otherwise, the file doesn't exist yet, so just create it
+                        } else {
+                            self.create_new_file(fr, file_path);
+                        }
+                    }
+                };
+            },
+            // the metadata file doesn't yet exist, so the file shouldn't exist either because the
+            // two files are created at the same time: create_new_file(), so we'll download it
+            Err(_) => {
+                println!("creating new file with metadata: {}", metadata_path_str);
+                self.create_new_file(fr, file_path);
+            }
+        };
+
+        Ok(())
+    }
+
+    fn create_new_file(&mut self, fr: FileResponse, file_path: Vec<String>) -> Result<(), String> {
+        let new_path_str = convert_pathVec_to_pathString(file_path.clone());
+        let metadata_path_str = convert_pathVec_to_metaData_pathStr(file_path.clone());
+        let mut dotf = File::create(metadata_path_str.clone()).expect("no metadata file could be created");
+
+        println!("creating new metadata file: {}", metadata_path_str);
+
+        let mut f = File::create(new_path_str).unwrap();
+
+        let mut resp = self.send_authorized_request(
+            format!("https://www.googleapis.com/drive/v3/files/{}\
+                    ?alt=media", fr.id.clone()));
+
+        let mut resp_string = String::new();
+        resp.read_to_string(&mut resp_string);
+        f.write_all(&resp_string.clone().into_bytes());;
+
+        println!("{}", resp_string.clone());
+
+        let md5_result = {
+            let mut md5 = Md5::new();
+            md5.input_str(&resp_string);
+            md5.result_str()
+        };
+
+        let (checksum_result, resp_string) = self.verify_file_checksum(fr, &md5_result);
+        if checksum_result {
+            dotf.write_all(&resp_string.into_bytes());
+            Ok(())
+        } else {
+            Err("downloaded checksums did not match".to_owned())
+        }
+    }
+
+    fn verify_file_checksum(&mut self, fr: FileResponse, checksum: &String) -> (bool, String) {
+        let (resp_string, resp) = self.send_authorized_request_to_json(
+            format!("https://www.googleapis.com/drive/v3/files/{}\
+                     ?fields=md5Checksum%2Csize", fr.id.clone()));
+        let fcr: FileCheckResponse = match resp {
+            Ok(fcr) => fcr,
+            Err(error) => {
+                println!("error when decoding filecheckresponse, {}", error);
+                self.resolve_error(&resp_string);
+                match self.send_authorized_request_to_json(
+                    format!("https://www.googleapis.com/drive/v3/files/{}\
+                             ?fields=md5Checksum%2Csize", fr.id.clone())).1 {
+                    Ok(fcr) => fcr,
+                    Err(error) => {
+                        println!("no valid response from Drive, error: {}", error);
+                        return (false, resp_string.clone())
+                    }
+                }
+            }
+        };
+
+        let same = checksum == &fcr.md5Checksum;
+        println!("{} =? {}", checksum, fcr.md5Checksum);
+        println!("same?: {:?}", same);
+        if !same {
+            println!("size: {}", fcr.size);
+        }
+        (same, resp_string)
+    }
+
+    fn send_authorized_request_to_json<T: Decodable>(&mut self, url: String) -> (String, Result<T, String>) {
+        read_json_to_type(&mut self.send_authorized_request(url))
+    }
+
+    fn send_authorized_request(&mut self, url: String) -> client::Response {
+        let mut maybe_resp = self.client.get(&url)
+                              .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
+                              .send();
+       match maybe_resp {
+            Ok(resp) => resp,
+            Err(error) => {
+                panic!("error when receiving response during file download, {}", error);
+            }
+        }
+    }
+}
+
+fn get_file_checksum(file_path: Vec<String>) -> io::Result<String> {
+    let mut f = try!(File::open(convert_pathVec_to_pathString(file_path)));
+    let mut f_str = String::new();
+
+    f.read_to_string(&mut f_str);
+
+    let mut md5 = Md5::new();
+    md5.input_str(&f_str);
+    Ok(md5.result_str())
+}
+
+
+fn convert_pathVec_to_metaData_pathStr(path: Vec<String>) -> String {
+    let mut metadata_new_root_folder = path.clone();
+    // remove the filename from the end of the path
+    let name = metadata_new_root_folder.pop().expect("there was no file for metadata to belong to");
+    // add a dot to the filename and reattach
+    // maybe there's a method for this
+    metadata_new_root_folder.push(".".to_owned() + &name.clone());
+    convert_pathVec_to_pathString(metadata_new_root_folder)
+}
+
+fn read_json_to_type<J: Read, T: Decodable>(json: &mut J) -> (String, Result<T, String>) {
+        let mut resp_string = String::new();
+        json.read_to_string(&mut resp_string);
+        (resp_string.clone(), match json::decode(&resp_string) {
+            Ok(t) => Ok(t),
+            Err(error) => Err(format!("{}", error))
+        })
 }
 
 fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
@@ -428,3 +535,11 @@ fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
     let tr: TokenResponse = json::decode(&resp_string).unwrap();
     (tr, resp_string)
 }
+
+fn convert_pathVec_to_pathString(path_vec: Vec<String>) -> String {
+    // convert the path vector to a string for file/folder creation in the system filesystem
+    path_vec.iter()
+            .intersperse(&"/".to_owned())
+            .fold("".to_owned(), |acc, ref filename| acc + &filename.clone())
+}
+
