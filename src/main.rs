@@ -162,8 +162,9 @@ impl FileTree {
         let maybe_resp = self.client.get(&format!("https://www.googleapis.com/drive/v3/files\
                               ?corpus=domain\
                               &pageSize=100\
-                              &q=%27{}%27+in+parents",
-                              root_folder))
+                              &q=%27{}%27+in+parents\
+                              +and+trashed+%3D+false"
+                              , root_folder))
                           .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
                           .send();
         // check to make sure response is valid
@@ -256,7 +257,9 @@ impl FileTree {
         }
     }
 
-    fn resolve_error(&mut self, resp_string: &String) -> io::Result<()> {
+    fn resolve_error(&mut self, resp_string: &String) -> Result<(), String> {
+        println!("attempting to resolve error response: {}", resp_string);
+
         let err_data = match Json::from_str(&resp_string) {
             Ok(fr) => fr,
             Err(error) => panic!("cannot read string as Json; error: {}, invalid response: {}", error, resp_string)
@@ -267,12 +270,13 @@ impl FileTree {
         };
     
         match err_obj.get("error") {
-            Some(error) => match error.as_object().expect("not an object").get("errors").expect("no array").as_array() {
-                Some(errors) => for i in errors {
+            Some(error) => match error.as_object().expect("error attribute not an object").get("errors").expect("no errors array").as_array() {
+                Some(errors) => {
+                for i in errors {
                     let mut decoder = Decoder::new(i.clone());
                     let err: ErrorDetailsResponse = match Decodable::decode(&mut decoder) {
                         Ok(err) => err,
-                        Err(error) => panic!("could not decode fileResponse, error: {}, attempted fr: {}", error, i)
+                        Err(error) => panic!("could not decode errorDetailsResponse, error: {}, attempted edr: {}", error, i)
                     };
     
                     if err.reason   == "authError"           &&
@@ -325,18 +329,32 @@ impl FileTree {
                             f.write_all(tr_str.as_bytes());
                         };
                     };
-                },
+                }
+                Ok(())},
                 None => panic!("the response given to resolve_error() had no array of errors")
             },
-            None => panic!("the response given to resolve_error() did not contain an error attribute")
-        };
-    
-        Ok(())
+            None => {
+                println!("the response given to resolve_error() did not contain an error attribute");
+                Err("there was no error attribute for the error sent to resolve_error()".to_owned())
+            }
+        }
     }
 
     fn download_and_save_file(&mut self, file_path: Vec<String>, fr: FileResponse) -> Result<(), String> {
         let new_path_str = convert_pathVec_to_pathString(file_path.clone());
         let metadata_path_str = convert_pathVec_to_metaData_pathStr(file_path.clone());
+
+        if fr.mimeType == "application/vnd.google-apps.document"
+           || fr.mimeType == "application/vnd.google-apps.form"
+           || fr.mimeType == "application/vnd.google-apps.drawing"
+           || fr.mimeType == "application/vnd.google-apps.fusiontable"
+           || fr.mimeType == "application/vnd.google-apps.map"
+           || fr.mimeType == "application/vnd.google-apps.presentation"
+           || fr.mimeType == "application/vnd.google-apps.spreadsheet"
+           || fr.mimeType == "application/vnd.google-apps.sites" {
+            println!("unsupported google filetype");
+            return Err("unsupported google doc filetype".to_owned())
+        }
 
         // try to open the metadata file, if it already exists
         match File::open(metadata_path_str.clone()) {
@@ -407,7 +425,7 @@ impl FileTree {
         resp.read_to_string(&mut resp_string);
         f.write_all(&resp_string.clone().into_bytes());;
 
-        println!("{}", resp_string.clone());
+        //println!("{}", resp_string.clone());
 
         let md5_result = {
             let mut md5 = Md5::new();
@@ -431,7 +449,7 @@ impl FileTree {
         let fcr: FileCheckResponse = match resp {
             Ok(fcr) => fcr,
             Err(error) => {
-                println!("error when decoding filecheckresponse, {}", error);
+                println!("error when decoding filecheckresponse, {}, response: {}", error, resp_string.clone());
                 self.resolve_error(&resp_string);
                 match self.send_authorized_request_to_json(
                     format!("https://www.googleapis.com/drive/v3/files/{}\
@@ -462,7 +480,7 @@ impl FileTree {
         let mut maybe_resp = self.client.get(&url)
                               .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
                               .send();
-       match maybe_resp {
+        match maybe_resp {
             Ok(resp) => resp,
             Err(error) => {
                 panic!("error when receiving response during file download, {}", error);
