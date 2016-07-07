@@ -15,7 +15,3 @@ libc            = "0.2.11"
 
 [dependencies.url]
 git = "https://github.com/servo/rust-url"
-
-[dependencies.trie]
-#git = "https://github.com/stnma7e/rust-trie"
-path = "src/rust-trie"

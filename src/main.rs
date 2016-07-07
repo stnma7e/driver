@@ -1,11 +1,10 @@
-#![allow(non_snake_case)] // to simplify json decoding for the Response types
+#![allow(non_snake_case)]
 #![allow(dead_code)]
 #![allow(unused_variables)]
 #![allow(unused_must_use)]
 
 extern crate hyper;
 extern crate rustc_serialize;
-extern crate trie;
 extern crate mime;
 extern crate url;
 extern crate itertools;
@@ -21,7 +20,6 @@ use mime::{Mime, TopLevel, SubLevel};
 
 use rustc_serialize::json::{Json, ToJson, Decoder, as_pretty_json};
 use rustc_serialize::{json, Decodable};
-use trie::Trie;
 use itertools::Itertools;
 use crypto::md5::Md5;
 use crypto::digest::Digest;
@@ -29,7 +27,6 @@ use crypto::digest::Digest;
 use std::io::prelude::*;
 use std::io;
 use std::fs::{File, DirBuilder, remove_file};
-use std::hash::{Hash, SipHasher, Hasher};
 use std::collections::hash_map::HashMap;
 
 use std::path::Path;
@@ -39,11 +36,10 @@ use fuse::{FileAttr, FileType, Filesystem, Request, ReplyAttr, ReplyEntry, Reply
 
 use driver::types::*;
 
-const CLIENT_ID: &'static str = "";
-const CLIENT_SECRET: &'static str = "";
+const CLIENT_ID: &'static str = "460434421766-0sktb0rkbvbko8omj8vhu8vv83giraao.apps.googleusercontent.com";
+const CLIENT_SECRET: &'static str = "m_ILEPtnZI53tXow9hoaabjm";
 
 pub struct FileTree {
-    tree: StringTrie<FileResponse>,
     files: HashMap<String, u64>,
     client: Client,
     auth_data: AuthData,
@@ -82,76 +78,43 @@ impl Filesystem for FileTree {
     }
 
     fn lookup(&mut self, _req: &Request, parent: u64, name: &Path, reply: ReplyEntry) {
-        let pathString = name.to_str().expect("invalid path");
-        let pathVec = convert_pathString_to_pathVec(pathString.to_string());
-
-        println!("{:?}", pathVec);
-        match self.tree.fetch(pathVec.clone()) {
-            Some(file) => {
-                let fileType = if self.tree.0.has_children(pathVec) {
-                    FileType::Directory
-                } else {
-                    FileType::RegularFile
-                };
-
-                let ts = Timespec::new(0,0);
-                let attr = FileAttr {
-                    ino: file.inode.unwrap(),
-                    size: 0,
-                    blocks: 0,
-                    atime: ts,
-                    mtime: ts,
-                    ctime: ts,
-                    crtime: ts,
-                    kind: fileType,
-                    perm: 0o755,
-                    nlink: 0,
-                    uid: 0,
-                    gid: 0,
-                    rdev: 0,
-                    flags: 0,
-                };
-
-                let ttl = Timespec::new(1, 0);
-                println!("replying lookup with {:?}", attr);
-            //    reply.entry(&ttl, &attr, 0);
-            },
-            None => {
-                //reply.error(ENOENT);
-            }
-        }
-
         if let Some(children) = self.inode_map.get(&parent) {
             for i in children {
-                if i.name == name.to_str().unwrap() {
-                let fileType =
-                    if i.mimeType == "application/vnd.google-apps.folder" {
-                        FileType::Directory
+                if i.name.clone() == name.to_str().unwrap() {
+                    let fileType =
+                        if i.mimeType == "application/vnd.google-apps.folder" {
+                            FileType::Directory
+                        } else {
+                            FileType::RegularFile
+                        };
+
+                    if let Some(inode) = i.inode {
+                        let ts = Timespec::new(0,0);
+                        let attr = FileAttr {
+                            ino: i.inode.unwrap(),
+                            size: 0,
+                            blocks: 0,
+                            atime: ts,
+                            mtime: ts,
+                            ctime: ts,
+                            crtime: ts,
+                            kind: fileType,
+                            perm: 0o755,
+                            nlink: 0,
+                            uid: 0,
+                            gid: 0,
+                            rdev: 0,
+                            flags: 0,
+                        };
+
+                        let ttl = Timespec::new(1, 0);
+                        reply.entry(&ttl, &attr, 0);
+                        return
                     } else {
-                        FileType::RegularFile
-                    };
-
-                    let ts = Timespec::new(0,0);
-                    let attr = FileAttr {
-                        ino: i.inode.unwrap(),
-                        size: 0,
-                        blocks: 0,
-                        atime: ts,
-                        mtime: ts,
-                        ctime: ts,
-                        crtime: ts,
-                        kind: fileType,
-                        perm: 0o755,
-                        nlink: 0,
-                        uid: 0,
-                        gid: 0,
-                        rdev: 0,
-                        flags: 0,
-                    };
-
-                    let ttl = Timespec::new(1, 0);
-                    reply.entry(&ttl, &attr, 0);
-                    return
+                        println!("no inode found for {:?}", i);
+                        reply.error(ENOENT);
+                        return
+                    }
                 }
             }
         }
@@ -159,155 +122,33 @@ impl Filesystem for FileTree {
 
     fn readdir(&mut self, _req: &Request, ino: u64, fh: u64, offset: u64, mut reply: ReplyDirectory) {
         println!("readdir(ino={}, fh={}, offset={})", ino, fh, offset);
-//        if ino == 1 {
-            if offset == 0 {
-                reply.add(1, 4, FileType::Directory, &Path::new("."));
-                reply.add(2, 5, FileType::Directory, &Path::new(".."));
-//
-//                let mut next_current_inode = self.current_inode;
-//                let mut inodes_to_add = HashMap::<u64, Vec<String>>::new();
-//                self.tree.as_trie_mut().traverse(&vec![], 2, &mut |path, v| {
-//                    match v {
-//                        Some(v) => {
-//                            println!("path: {:?}, {:?}", path, v);
-//                             match v.inode {
-//                                None => {
-//                                    v.inode = Some(next_current_inode);
-//                                    next_current_inode += 1;
-//                                    println!("adding inode, {}, for {:?}", next_current_inode-1, path);
-//                                    inodes_to_add.insert(next_current_inode, path.clone());
-//                                },
-//                                _ => {},
-//                            };
-//
-//                            let inode = v.inode.expect("no inode for file");
-//                            let fileType =
-//                                if v.mimeType == "application/vnd.google-apps.folder" {
-//                                    FileType::Directory
-//                                } else {
-//                                    FileType::RegularFile
-//                                };
-//                            println!("replying readdir with {:?}", inode);
-//                            reply.add(inode, inode, fileType, &Path::new(&convert_pathVec_to_pathString(path.clone())));
-//                        },
-////                        None => {}
-//                    };
-//                });
+        if offset == 0 {
+            reply.add(1, 4, FileType::Directory, &Path::new("."));
+            reply.add(2, 5, FileType::Directory, &Path::new(".."));
 
-            //self.current_inode = next_current_inode;
-            //for (k, v) in inodes_to_add {
-            //    self.inode_map.insert(k, v);
-            //}
-//            }
-//            reply.ok();
-//
-//        } else {
-//            if offset == 0 {
-//                let mut next_current_inode = self.current_inode;
-//                let mut inodes_to_add = HashMap::<u64, Vec<String>>::new();
-
-                if let Some(children) = self.inode_map.get(&ino) {
-                    for child in children {
-                        if let Some(inode) = child.inode {
-                            let fileType =
-                                if child.mimeType == "application/vnd.google-apps.folder" {
-                                    FileType::Directory
-                                } else {
-                                    FileType::RegularFile
-                                };
-                            reply.add(inode, inode, fileType, &Path::new(&child.name));
-                        } else {
-                            println!("no inode for child {:?}, parent {:?}", child, children);
-                            panic!()
-                        }
+            if let Some(children) = self.inode_map.get(&ino) {
+                for child in children {
+                    if let Some(inode) = child.inode {
+                        let fileType =
+                            if child.mimeType == "application/vnd.google-apps.folder" {
+                                FileType::Directory
+                            } else {
+                                FileType::RegularFile
+                            };
+                        reply.add(inode, inode, fileType, &Path::new(&child.name));
+                    } else {
+                        println!("no inode for child {:?}, parent {:?}", child, children);
+                        panic!()
                     }
+                }
 
-
-//                if let &Some(root_path) = &self.inode_map.get(&ino) {
-//                    let root_path = vec![];
-                    //let mut dot_root_path = root_path.clone();
-                    //dot_root_path.push(".".to_string());
-                    //if let Some(dot_inode) = self.tree.as_trie().fetch(dot_root_path.clone()) {
-                    //    reply.add(dot_inode.inode.unwrap(), 0, FileType::Directory, &Path::new("."));
-                    //} else {
-                    //    let inode = next_current_inode;
-                    //    next_current_inode += 1;
-                    //    println!("adding inode, {}, for {:?}", next_current_inode-1, dot_root_path);
-                    //    inodes_to_add.insert(next_current_inode, dot_root_path.clone());
-                    //    reply.add(inode, 0, FileType::Directory, &Path::new("."));
-                    //}
-                    //dot_root_path.pop();
-                    //dot_root_path.push("..".to_string());
-                    //if let Some(dot_inode) = self.tree.as_trie().fetch(dot_root_path.clone()) {
-                    //    reply.add(dot_inode.inode.unwrap(), 0, FileType::Directory, &Path::new(".."));
-                    //} else {
-                    //    let inode = next_current_inode;
-                    //    next_current_inode += 1;
-                    //    println!("adding inode, {}, for {:?}", next_current_inode-1, dot_root_path.clone());
-                    //    inodes_to_add.insert(next_current_inode, dot_root_path.clone());
-                    //    reply.add(inode, 0, FileType::Directory, &Path::new(".."));
-                    //}
-
-//                    self.tree.as_trie_mut().traverse(&root_path, -1, &mut |path, v| {
-//                        match v {
-//                            Some(v) => {
-//                                println!("path: {:?}, {:?}", path, v);
-//                                 match v.inode {
-//                                    None => {
-//                                        v.inode = Some(next_current_inode);
-//                                        next_current_inode += 1;
-//                                        println!("adding inode, {}, for {:?}", next_current_inode-1, path);
-//                                        inodes_to_add.insert(next_current_inode, path.clone());
-//                                    },
-//                                    _ => {},
-//                                };
-//
-//                                let inode = v.inode.expect("no inode for file");
-//                                let fileType =
-//                                    if v.mimeType == "application/vnd.google-apps.folder" {
-//                                        FileType::Directory
-//                                    } else {
-//                                        FileType::RegularFile
-//                                };
-//                                println!("replying readdir with {:?}", inode);
-//                                reply.add(inode, inode, fileType, &Path::new(&convert_pathVec_to_pathString(path.clone())));
-//                            },
-//                            None => {}
-//                        };
-//                    });
-//
-//                }
-//
-                //self.current_inode = next_current_inode;
-                //for (k, v) in inodes_to_add {
-                //    self.inode_map.insert(k, v);
-                //}
-
-                reply.ok();
+                reply.ok()
             } else {
-                    println!("here");
-                    reply.error(ENOENT);
-                    return
+                println!("here");
+                reply.error(ENOENT);
+                return
             }
-        //}
-
-    }
-
-        //println!("{:?}", self.inode_map);
-    }
-}
-
-#[derive(Debug)]
-struct StringTrie<V: Clone>(Trie<String, V>);
-impl<V: Clone> StringTrie<V> {
-    fn fetch(&self, path: Vec<String>) -> Option<V> {
-        self.0.fetch(path)
-    }
-    fn as_trie(&self) -> &Trie<String,V> {
-        &self.0
-    }
-    fn as_trie_mut(&mut self) -> &mut Trie<String, V> {
-        &mut self.0
+        }
     }
 }
 
@@ -315,7 +156,6 @@ fn main() {
     let c = Client::new();
 
     let cache_file = "access";
-    let file_tree: StringTrie<FileResponse> = StringTrie(Trie::<String, FileResponse>::new());
 
     let tr: TokenResponse = match File::open(cache_file) {
         // access file exists, so we can just use the access code that's stored in the file
@@ -349,7 +189,6 @@ fn main() {
     //println!("{:?}", tr);
 
     let mut ft = FileTree {
-        tree: file_tree,
         files: HashMap::new(),
         client: Client::new(),
         auth_data: AuthData {
@@ -364,41 +203,21 @@ fn main() {
 
      // we're probably dealing with the root folder, so we need to make it's own parent
     //let root_folder = (vec![], "0B7TtU3YsiIjTTS1oUE5wZFpsYVk");
-    //let root_folder = (vec![], "0B7TtU3YsiIjTWjBOM0YwYkVBa1U");
-    let root_folder = (vec![], "0B7TtU3YsiIjTeHJGR1VKMHB3cWs");
+    let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTWjBOM0YwYkVBa1U");
+//    let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTeHJGR1VKMHB3cWs");
     ft.files.entry(root_folder.1.to_string()).or_insert(ft.current_inode);
     ft.inode_map.entry(ft.current_inode).or_insert(Vec::new());
     println!("{:?}", ft.files);
     ft.current_inode += 1;
 
-    //ft.get_files((vec!["root".to_string()], "0B7TtU3YsiIjTWjBOM0YwYkVBa1U"));
+    //ft.get_files((vec!["root".to_string()], "0B7TtU3/YsiIjTWjBOM0YwYkVBa1U"));
     //ft.get_files((vec!["root".to_string()], "root"));
-    ft.get_ffiles(root_folder);
+    ft.get_files(root_folder);
 
     println!("{:?}", ft.files);
     println!("{:?}", ft.inode_map);
 //  println!("{:?}", ft.tree);
 
-    let mut x = FileResponse{
-        kind:String::new(),
-        id:String::new(),
-        name:String::new(),
-        mimeType:String::new(),
-        inode: None,
-    };
-
-    ft.tree.as_trie_mut().traverse(&vec![], 3, &mut |path, v| {
-        match v {
-            Some(ref v) => {
-                println!("path: {:?}, {:?}", path, v);
-                x = (*v).clone();
-            },
-            None => {}
-        };
-    });
-
-    //println!("{:?}", file_tree.fetch)
-    //
     fuse::mount(ft, &"root.2", &[]);
 }
 
@@ -462,7 +281,7 @@ impl FileTree {
         }
     }
 
-    fn get_ffiles(&mut self, root_folder: (Vec<String>, &str)) {
+    fn get_files(&mut self, root_folder: (Vec<String>, &str)) {
         let files = match self.get_file_list(&root_folder.1.clone()) {
             Ok(files) => files,
             Err(error) => panic!(error)
@@ -498,67 +317,6 @@ impl FileTree {
             new_root_folder.push(fr.name.clone());
             let new_path_str = convert_pathVec_to_pathString(new_root_folder.clone());
             let metadata_path_str = convert_pathVec_to_metaData_pathStr(new_root_folder.clone());
-
-            if fr.mimeType.clone() == "application/vnd.google-apps.folder" {
-                println!("getting the next directory's files, {}", new_path_str.clone());
-                // create the directory in the system filesystem
-                dir_builder.create(new_path_str);
-                // then recurse to retrieve children files
-                self.get_ffiles((new_root_folder.clone(), &fr.id.clone()));
-            } else {
-            // we're working with a file, not a folder, so we need to save it to the system
-                println!("saving file, {}", new_path_str.clone());
-                match self.download_and_save_file(new_root_folder.clone(), fr.clone()) {
-                    Ok(_) => (),
-                    Err(error) => {
-                        println!("error when saving or downloading file: {}", error);
-                        println!("deleting metadata, and trying a fresh save");
-                        remove_file(&metadata_path_str);
-                        self.download_and_save_file(new_root_folder, fr);
-                    }
-                };
-            }
-        }
-    }
-
-    fn get_files(&mut self, root_folder: (Vec<String>, &str)) {
-        let files = match self.get_file_list(&root_folder.1.clone()) {
-            Ok(files) => files,
-            Err(error) => panic!(error)
-        };
-        let mut dir_builder = DirBuilder::new();
-        dir_builder.recursive(true);
-
-
-        // our file list is A-OK
-        for i in files.iter() {
-            // we'll try to decode each file's metadata JSON object in memory to a FileResponse struct
-            let mut decoder = Decoder::new(i.clone());
-            let fr: FileResponse = match Decodable::decode(&mut decoder) {
-                Ok(fr) => fr,
-                // whatever JSON array we received before has something in it that's not a FileResponse
-                Err(error) => panic!("could not decode fileResponse, error: {}, attempted fr: {}", error, i)
-            };
-
-            // this will be our starting path when we add to the trie later
-            let mut new_root_folder = root_folder.0.clone();
-            // add the file we're working with to the path for the trie
-            new_root_folder.push(fr.name.clone());
-            let new_path_str = convert_pathVec_to_pathString(new_root_folder.clone());
-            let metadata_path_str = convert_pathVec_to_metaData_pathStr(new_root_folder.clone());
-
-            self.tree.as_trie_mut().insert(new_root_folder.clone(), fr.clone());
-
-            {
-                if let Some(parent) = self.files.get(root_folder.1) {
-                    println!("here1, parent {:?}, files: {:?}", root_folder.0, root_folder.1);
-                    self.inode_map.get_mut(parent).expect("no parent inode for child").push(fr.clone());
-                    break
-                }
-                //.expect(&format!("no parent {:?} for child {:?}", root_folder, fr.clone()));
-            }
-            self.files.entry(new_path_str.clone()).or_insert(self.current_inode);
-            self.current_inode += 1;
 
             if fr.mimeType.clone() == "application/vnd.google-apps.folder" {
                 println!("getting the next directory's files, {}", new_path_str.clone());
@@ -861,15 +619,20 @@ fn request_new_access_code(c: &Client) -> (TokenResponse, String) {
                &client_secret={}\
                &redirect_uri=urn:ietf:wg:oauth:2.0:oob\
                &grant_type=authorization_code"
-               , CLIENT_ID, CLIENT_SECRET, code_string))
+               , code_string, CLIENT_ID, CLIENT_SECRET))
         .send()
         .unwrap();
     print!("{}\n{}\n{}\n\n", resp.url, resp.status, resp.headers);
 
     let mut resp_string = String::new();
     resp.read_to_string(&mut resp_string);
-    let tr: TokenResponse = json::decode(&resp_string).unwrap();
-    (tr, resp_string)
+    match json::decode(&resp_string) {
+        Ok(tr) => return (tr, resp_string),
+        Err(error) => {
+            println!("response: {}", resp_string);
+            panic!("{}", error)
+        }
+    }
 }
 
 fn convert_pathVec_to_pathString(path_vec: Vec<String>) -> String {
