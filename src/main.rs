@@ -36,8 +36,8 @@ use fuse::{FileAttr, FileType, Filesystem, Request, ReplyAttr, ReplyEntry, Reply
 
 use driver::types::*;
 
-const CLIENT_ID: &'static str = "460434421766-0sktb0rkbvbko8omj8vhu8vv83giraao.apps.googleusercontent.com";
-const CLIENT_SECRET: &'static str = "m_ILEPtnZI53tXow9hoaabjm";
+const CLIENT_ID: &'static str = "";
+const CLIENT_SECRET: &'static str = "";
 
 pub struct FileTree {
     files: HashMap<String, u64>,
@@ -186,8 +186,6 @@ fn main() {
         }
     };
 
-    //println!("{:?}", tr);
-
     let mut ft = FileTree {
         files: HashMap::new(),
         client: Client::new(),
@@ -201,33 +199,22 @@ fn main() {
         current_inode: 1,
     };
 
-     // we're probably dealing with the root folder, so we need to make it's own parent
-    //let root_folder = (vec![], "0B7TtU3YsiIjTTS1oUE5wZFpsYVk");
+//    let root_folder = (vec![], "0B7TtU3YsiIjTTS1oUE5wZFpsYVk");
     let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTWjBOM0YwYkVBa1U");
 //    let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTeHJGR1VKMHB3cWs");
+
+    // we're probably dealing with the root folder, so we need to make it's own parent
     ft.files.entry(root_folder.1.to_string()).or_insert(ft.current_inode);
     ft.inode_map.entry(ft.current_inode).or_insert(Vec::new());
     println!("{:?}", ft.files);
     ft.current_inode += 1;
 
-    //ft.get_files((vec!["root".to_string()], "0B7TtU3/YsiIjTWjBOM0YwYkVBa1U"));
-    //ft.get_files((vec!["root".to_string()], "root"));
     ft.get_files(root_folder);
 
     println!("{:?}", ft.files);
     println!("{:?}", ft.inode_map);
-//  println!("{:?}", ft.tree);
 
     fuse::mount(ft, &"root.2", &[]);
-}
-
-fn blah(path: &Vec<String>, v: Option<FileResponse>) {
-    match v {
-        Some(ref v) => {
-            println!("path: {:?}, {:?}", path, v);
-        },
-        None => {}
-    };
 }
 
 impl FileTree {
@@ -326,7 +313,6 @@ impl FileTree {
                 self.get_files((new_root_folder.clone(), &fr.id.clone()));
             } else {
             // we're working with a file, not a folder, so we need to save it to the system
-                println!("saving file, {}", new_path_str.clone());
                 match self.download_and_save_file(new_root_folder.clone(), fr.clone()) {
                     Ok(_) => (),
                     Err(error) => {
@@ -500,23 +486,32 @@ impl FileTree {
         let metadata_path_str = convert_pathVec_to_metaData_pathStr(file_path.clone());
         let mut dotf = File::create(metadata_path_str.clone()).expect("no metadata file could be created");
 
-        println!("creating new metadata file: {}", metadata_path_str);
+        println!("downloading new file, creating new metadata file: {}", metadata_path_str);
 
         let mut f = File::create(new_path_str).unwrap();
 
-        let mut resp = self.send_authorized_request(
-            format!("https://www.googleapis.com/drive/v3/files/{}\
-                    ?alt=media", fr.id.clone()));
+        let maybe_resp = self.client.get(&format!("https://www.googleapis.com/drive/v3/files/{}\
+                    ?alt=media", fr.id.clone()))
+                             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
+                             .send();
+        let mut resp = match maybe_resp {
+            Ok(resp) => resp,
+            Err(error) => {
+                panic!("error when receiving response during file download, {}", error);
+            }
+        };
 
-        let mut resp_string = String::new();
-        resp.read_to_string(&mut resp_string);
-        f.write_all(&resp_string.clone().into_bytes());;
-
-        //println!("{}", resp_string.clone());
+        let mut resp_string = Vec::<u8>::new();
+        match resp.read_to_end(&mut resp_string) {
+            Ok(_) => (),
+            Err(error) => panic!("error in reading response: {}", error)
+        }
+        println!("len: {}", resp_string.len());
+        f.write_all(&resp_string.clone());
 
         let md5_result = {
             let mut md5 = Md5::new();
-            md5.input_str(&resp_string);
+            md5.input(&resp_string);
             md5.result_str()
         };
 
@@ -551,9 +546,9 @@ impl FileTree {
         };
 
         let same = checksum == &fcr.md5Checksum;
-        println!("{} =? {}", checksum, fcr.md5Checksum);
-        println!("same?: {:?}", same);
         if !same {
+            println!("{} =? {}", checksum, fcr.md5Checksum);
+            println!("same?: {:?}", same);
             println!("size: {}", fcr.size);
         }
         (same, resp_string)
