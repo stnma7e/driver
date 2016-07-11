@@ -91,12 +91,14 @@ impl Filesystem for FileTree {
                                 FileType::RegularFile
                             };
 
+                        let size = child.size.unwrap_or(0);
+
                         if let Some(inode) = child.inode {
                             let ts = Timespec::new(0,0);
                             let attr = FileAttr {
                                 ino: child.inode.unwrap(),
-                                size: 877620,
-                                blocks: 1720,
+                                size: size,
+                                blocks: size/512,
                                 atime: ts,
                                 mtime: ts,
                                 ctime: ts,
@@ -162,18 +164,19 @@ impl Filesystem for FileTree {
             match File::open(&fr.path_string.clone().unwrap()) {
                 Ok(mut handle) => {
                     let mut data = Vec::<u8>::new();
-                    if let Ok(_) = handle.read_to_end(&mut data) {
-                        let d: Vec<u8> = data[offset as usize..]
-                                        .to_vec()
-                                        .into_iter()
-                                        .take(size as usize)
-                                        .collect();
-                        reply.data(&d);
-                        return
-                    } else {
-                        println!("couldnt read file handle, {}", fr.path_string.clone().unwrap());
-                    }
-                }
+                    match handle.read_to_end(&mut data) {
+                        Ok(_) => (),
+                        Err(error) => println!("couldnt read file handle, {}: error, {}", fr.path_string.clone().unwrap(), error),
+                    };
+
+                    let d: Vec<u8> = data[offset as usize..]
+                                    .to_vec()
+                                    .into_iter()
+                                    .take(size as usize)
+                                    .collect();
+                    reply.data(&d);
+                    return
+                },
                 Err(error) => {
                     println!("no downloaded file for {}", fr.path_string.clone().unwrap());
                 }
@@ -348,7 +351,7 @@ impl FileTree {
             let new_path_str = convert_pathVec_to_pathString(new_root_folder.clone());
             let metadata_path_str = convert_pathVec_to_metaData_pathStr(new_root_folder.clone());
             fr.inode = Some(self.current_inode);
-            fr.path_string = Some(new_path_str);
+            fr.path_string = Some(new_path_str.clone());
 
             if let Some(parent) = self.files.get(root_folder.1) {
                 println!("found parent {}, adding new child {}", root_folder.1, fr.name);
@@ -363,13 +366,6 @@ impl FileTree {
             self.child_map.entry(self.current_inode).or_insert(Vec::new());
             self.current_inode += 1;
 
-            // this will be our starting path when we add to the trie later
-            let mut new_root_folder = root_folder.0.clone();
-            // add the file we're working with to the path for the trie
-            new_root_folder.push(fr.name.clone());
-            let new_path_str = convert_pathVec_to_pathString(new_root_folder.clone());
-            let metadata_path_str = convert_pathVec_to_metaData_pathStr(new_root_folder.clone());
-
             if fr.mimeType.clone() == "application/vnd.google-apps.folder" {
                 println!("getting the next directory's files, {}", new_path_str.clone());
                 // create the directory in the system filesystem
@@ -379,7 +375,27 @@ impl FileTree {
             } else {
             // we're working with a file, not a folder, so we need to save it to the system
                 match self.download_and_save_file(new_root_folder.clone(), fr.clone()) {
-                    Ok(_) => (),
+                    Ok(_) => {
+                        let mut fr_new = self.inode_map.get_mut(&(self.current_inode-1)).unwrap();
+                        match File::open(&metadata_path_str)
+                        {
+                            Ok(mut metahandle) => {
+                                match read_json_to_type(&mut metahandle).1 as Result<FileCheckResponse, String> {
+                                    Ok(fc) => {
+                                        fr_new.size = Some(fc.size.parse::<u64>().unwrap());
+                                    },
+                                    Err(error) => {
+                                        println!("couldn't parse metadata file, {}", new_path_str.clone());
+                                        fr_new.size = Some(0);
+                                    }
+                                }
+                            },
+                            Err(error) => {
+                                println!("no metadata file for {}", new_path_str.clone());
+                                fr_new.size = Some(0);
+                            }
+                        };
+                    },
                     Err(error) => {
                         println!("error when saving or downloading file: {}", error);
                         println!("deleting metadata, and trying a fresh save");

@@ -33,6 +33,7 @@ pub struct FileResponse {
     pub mimeType: String,
     pub inode: Option<u64>,
     pub path_string: Option<String>,
+    pub size: Option<u64>,
 }
 
 impl ToJson for FileResponse {
