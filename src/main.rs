@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 #![allow(unused_variables)]
-#![allow(unused_must_use)]
 
 extern crate hyper;
 extern crate rustc_serialize;
@@ -39,17 +38,19 @@ use driver::types::*;
 
 const CLIENT_ID: &'static str = "";
 const CLIENT_SECRET: &'static str = "";
+const CACHE_FILE: &'static str = "access";
 
-pub struct FileTree {
+
+pub struct FileTree<'a> {
     client: Client,
-    auth_data: AuthData,
+    auth_data: AuthData<'a>,
     files: HashMap<String, u64>,
     child_map: HashMap<u64, Vec<u64>>,
     inode_map: HashMap<u64, FileResponse>,
     current_inode: u64,
 }
 
-impl Filesystem for FileTree {
+impl<'a> Filesystem for FileTree<'a> {
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         println!("getattr(ino={})", ino);
@@ -214,36 +215,23 @@ impl Filesystem for FileTree {
 fn main() {
     let c = Client::new();
 
-    let cache_file = "access";
+    let tr = || -> io::Result<TokenResponse> {
+        let mut handle = try!(File::open(CACHE_FILE)
+            .or_else(|_| -> Result<std::fs::File, std::io::Error> {
+                let mut handle = try!(File::create(CACHE_FILE));
+                let (tr, resp_string) = request_new_access_code(&c);
+                println!("{}", resp_string);
+                try!(handle.write_all(resp_string.as_bytes()));
+                Ok(handle)
+            })
+        );
 
-    let tr: TokenResponse = match File::open(cache_file) {
-        // access file exists, so we can just use the access code that's stored in the file
-        Ok(mut handle) => {
-            let mut access_string = String::new();
-            if let Ok(_) = handle.read_to_string(&mut access_string) {
-                println!("{}", access_string);
-                match json::decode(&access_string) {
-                    Ok(tr) => tr,
-                    Err(error) => panic!("reading the tokenResponse from the access file failed. is this really a TokenResponse?, {:?}", error),
-                }
-            } else {
-                panic!("mklaf")
-            }
-        }
-
-        // access file doesn't exist, so we need to poll the user for a new access code
-        Err(_) => {
-            match File::create(cache_file) {
-                Ok(mut handle) => {
-                    let (tr, resp_string) = request_new_access_code(&c);
-                    println!("{}", resp_string);
-                    handle.write_all(resp_string.as_bytes());
-                    tr
-                }
-                Err(error) => panic!("error when creating access file: {}", error),
-            }
-        }
-    };
+        let mut access_string = String::new();
+        try!(handle.read_to_string(&mut access_string));
+        println!("{}", access_string);
+        Ok(json::decode(&access_string)
+            .expect("reading the tokenResponse from the access file failed. is this really a TokenResponse?"))
+    }().expect("failure in reading access file");
 
     let mut ft = FileTree {
         files: HashMap::new(),
@@ -252,7 +240,7 @@ fn main() {
             tr: tr.clone(),
             client_id: CLIENT_ID.to_owned(),
             client_secret: CLIENT_SECRET.to_owned(),
-            cache_file_path: "access".to_owned(),
+            cache_file_path: CACHE_FILE,
         },
         inode_map: HashMap::new(),
         child_map: HashMap::new(),
@@ -269,7 +257,7 @@ fn main() {
     println!("{:?}", ft.files);
     ft.current_inode += 1;
 
-    ft.get_files(root_folder);
+    ft.get_files(root_folder).expect("this shit fucked up");
 
     println!("{:?}", ft.files);
     println!("{:?}", ft.inode_map);
@@ -277,73 +265,57 @@ fn main() {
     fuse::mount(ft, &"root.2", &[]);
 }
 
-impl FileTree {
-    fn get_file_list(&mut self, root_folder: &str) -> Result<json::Array, String> {
-        let maybe_resp = self.client.get(&format!("https://www.googleapis.com/drive/v3/files\
+impl<'a> FileTree<'a> {
+    fn get_file_list(&mut self, root_folder: &str) -> Result<json::Array, DriveError> {
+        let mut resp = try!(self.client.get(&format!("https://www.googleapis.com/drive/v3/files\
                               ?corpus=domain\
                               &pageSize=100\
                               &q=%27{}%27+in+parents\
                               +and+trashed+%3D+false"
                               , root_folder))
                           .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
-                          .send();
-        // check to make sure response is valid
-        let mut resp = match maybe_resp {
-            Ok(resp) => resp,
-            Err(error) => return Err(format!("error in get request when receiving file list, {}", error))
-        };
+                          .send());
 
         // convert the response to a string, then to a JSON object
         let mut resp_string = String::new();
         resp.read_to_string(&mut resp_string);
-        let fr_data = match Json::from_str(&resp_string) {
-            Ok(fr) => fr,
-            Err(error) => panic!("cannot read string as Json; invalid response, {}", error)
-        };
-        let fr_obj  = match fr_data.as_object() {
-            Some(fr) => fr,
-            None => panic!("JSON data returned by Drive was not an objcet")
-        };
+        let fr_data = try!(Json::from_str(&resp_string));
+        let fr_obj  = try!(fr_data.as_object()
+                                  .ok_or(DriveError::JsonObjectify));
 
         //println!("{}", resp_string);
 
-        match fr_obj.get("files") {
-            Some(files) => match files.as_array() {
-                Some(files_array) => Ok(files_array.clone()),
-                None => panic!("the files attribute from the file list was not a valid JSON array")
-            },
-            // maybe the json returned was really an error response
-            // so let's try to reauthenticate
-            None => {
-                println!("error when retreiving file list {}", resp_string);
-                match self.resolve_error(&resp_string) {
-                // if resolve_error did something (could be a re-authorization request, etc.), we can
-                // try to get the file list again
-                Ok(_) => self.get_file_list(root_folder),
-                // otherwise resolve_error encountered some other error, and was not able to reslove
-                // anything
-                Err(error) => Err(format!("there was no files attribute in this response, {}; resolution failed with: {}", resp_string, error))
-            }
-            }
-        }
+        let files = try!(fr_obj.get("files").ok_or(DriveError::JsonInvalidAttribute));
+        let files_array = try!(files.as_array().ok_or(DriveError::JsonCannotConvertToArray));
+        Ok(files_array.clone())
+
+        // maybe the json returned was really an error response
+        // so let's try to reauthenticate
+//            None => {
+//                println!("error when retreiving file list {}", resp_string);
+//                match self.resolve_error(&resp_string) {
+                    // if resolve_error did something (could be a re-authorization request, etc.), we can
+//                    // try to get the file list again
+//                    Ok(_) => self.get_file_list(root_folder),
+//                    // otherwise resolve_error encountered some other error, and was not able to reslove
+//                    // anything
+//                    Err(error) => Err(format!("there was no files attribute in this response, {}; resolution failed with: {}", resp_string, error))
+//                }
+//            }
+//        }
     }
 
-    fn get_files(&mut self, root_folder: (Vec<String>, &str)) {
-        let files = match self.get_file_list(&root_folder.1.clone()) {
-            Ok(files) => files,
-            Err(error) => panic!(error)
-        };
+    fn get_files(&mut self, root_folder: (Vec<String>, &str)) -> Result<(), DriveError> {
+        let files = try!(self.get_file_list(&root_folder.1.clone()));
         let mut dir_builder = DirBuilder::new();
         dir_builder.recursive(true);
+
+        println!("{:?}", files);
 
         for i in files.iter() {
             // we'll try to decode each file's metadata JSON object in memory to a FileResponse struct
             let mut decoder = Decoder::new(i.clone());
-            let mut fr: FileResponse = match Decodable::decode(&mut decoder) {
-                Ok(fr) => fr,
-                // whatever JSON array we received before has something in it that's not a FileResponse
-                Err(error) => panic!("could not decode fileResponse, error: {}, attempted fr: {}", error, i)
-            };
+            let mut fr: FileResponse = try!(Decodable::decode(&mut decoder));
 
             let mut new_root_folder = root_folder.0.clone();
             // add the file we're working with to the path for the trie
@@ -380,7 +352,7 @@ impl FileTree {
                         match File::open(&metadata_path_str)
                         {
                             Ok(mut metahandle) => {
-                                match read_json_to_type(&mut metahandle).1 as Result<FileCheckResponse, String> {
+                                match read_json_to_type(&mut metahandle) as Result<FileCheckResponse, DriveError> {
                                     Ok(fc) => {
                                         fr_new.size = Some(fc.size.parse::<u64>().unwrap());
                                     },
@@ -397,7 +369,7 @@ impl FileTree {
                         };
                     },
                     Err(error) => {
-                        println!("error when saving or downloading file: {}", error);
+                        println!("error when saving or downloading file: {:?}", error);
                         println!("deleting metadata, and trying a fresh save");
                         remove_file(&metadata_path_str);
                         self.download_and_save_file(new_root_folder, fr);
@@ -405,6 +377,8 @@ impl FileTree {
                 };
             }
         }
+
+        Ok(())
     }
 
     fn resolve_error(&mut self, resp_string: &String) -> Result<(), String> {
@@ -494,7 +468,7 @@ impl FileTree {
         }
     }
 
-    fn download_and_save_file(&mut self, file_path: Vec<String>, fr: FileResponse) -> Result<(), String> {
+    fn download_and_save_file(&mut self, file_path: Vec<String>, fr: FileResponse) -> Result<(), DriveError> {
         let new_path_str = convert_pathVec_to_pathString(file_path.clone());
         let metadata_path_str = convert_pathVec_to_metaData_pathStr(file_path.clone());
 
@@ -507,7 +481,7 @@ impl FileTree {
            || fr.mimeType == "application/vnd.google-apps.spreadsheet"
            || fr.mimeType == "application/vnd.google-apps.sites" {
             println!("unsupported google filetype");
-            return Err("unsupported google doc filetype".to_owned())
+            return Err(DriveError::UnsupportedDocumentType)
         }
 
         // try to open the metadata file, if it already exists
@@ -515,132 +489,145 @@ impl FileTree {
             Ok(mut dotf) => {
                 // if it does, we'll read the file to see if the checksum matches what we have on
                 // the server
-                match read_json_to_type(&mut dotf).1 as Result<FileCheckResponse, String> {
-                    Ok(fc) => {
-                        if !self.verify_file_checksum(fr.clone(), &fc.md5Checksum).0 {
-                            println!("updating metadata for {}", new_path_str);
-
-                            // if the checksum fails, we need to redownload it
-                            self.create_new_file(fr.clone(), file_path.clone());
-                        }
-                    }
+                let fc = try!((read_json_to_type(&mut dotf) as Result<FileCheckResponse, DriveError>).or_else(|_| {
+                    println!("here more {}", metadata_path_str.clone());
+                    let mut strg = String::new();
+                    dotf.read_to_string(&mut strg);
+                    println!("{}", strg);
+                    Err(DriveError::Tester)
+                }));
+                try!(self.verify_file_checksum(&fr, &fc.md5Checksum).or_else(|_| -> Result<String, DriveError> {
+                    println!("updating metadata for {}", new_path_str);
+                    // if the checksum fails, we need to redownload it
+                    try!(self.create_new_file(fr.clone(), file_path.clone()));
+                    Ok("".to_string())
+                }));
                     // if the file exists, but doesn't read (this should be an error), but we'll
                     // checksum the file (if we have it) on the system, and compare it to the
                     // server, if all is OK, create a new metadata file
-                    Err(error) => {
-                        println!("reading the filecheck from {} failed, error: {:?}", new_path_str.clone(), error);
-                        println!("creating new metadata file");
-                        let mut dotf = File::create(metadata_path_str.clone()).unwrap();
-                        // if the file exists, get the checksum
-                        if let Ok(current_file_checksum) = get_file_checksum(file_path.clone()) {
-                            let (equal, resp_string) = self.verify_file_checksum(fr.clone(), &current_file_checksum);
-                            // if the checksum matches that from Drive, then file is downloaded
-                            // correctly, and all we need to do is cache the checksum
-                            if equal {
-                                dotf.write_all(&resp_string.into_bytes());
-                            // the file's checksum doesn't match the server's, so we need to
-                            // re-download it
-                            } else {
-                                println!("checksum match failed, redownloading file {}", new_path_str);
-                                self.create_new_file(fr, file_path);
-                            }
-                        // otherwise, the file doesn't exist yet, so just create it
-                        } else {
-                            self.create_new_file(fr, file_path);
-                        }
-                    }
-                };
+    //                Err(error) => {
+//                        println!("reading the filecheck from {} failed, error: {:?}", new_path_str.clone(), error);
+//                        println!("creating new metadata file");
+//                        let mut dotf = try!(File::create(metadata_path_str.clone()));
+//                        // if the file exists, get the checksum
+//                        let current_file_checksum = try!(get_file_checksum(file_path.clone()));
+//                        let equal = try!(self.verify_file_checksum(fr.clone(), &current_file_checksum));
+//                        // if the checksum matches that from Drive, then file is downloaded
+//                        // correctly, and all we need to do is cache the checksum
+//                        if equal {
+//                            try!(dotf.write_all(&resp_string.into_bytes()));
+//                        // the file's checksum doesn't match the server's, so we need to
+//                        // re-download it
+//                        } else {
+//                            println!("checksum match failed, redownloading file {}", new_path_str);
+//                            self.create_new_file(fr, file_path);
+//                        }
+////                        // otherwise, the file doesn't exist yet, so just create it
+////                        } else {
+// //                           self.create_new_file(fr, file_path);
+//  //                      }
+    //                }
+    //            };
             },
             // the metadata file doesn't yet exist, so the file shouldn't exist either because the
             // two files are created at the same time: create_new_file(), so we'll download it
             Err(_) => {
                 println!("creating new file with metadata: {}", metadata_path_str);
-                self.create_new_file(fr, file_path);
+                try!(self.create_new_file(fr, file_path));
             }
         };
 
         Ok(())
     }
 
-    fn create_new_file(&mut self, fr: FileResponse, file_path: Vec<String>) -> Result<(), String> {
+    fn create_new_file(&mut self, fr: FileResponse, file_path: Vec<String>) -> Result<(), DriveError> {
         let new_path_str = convert_pathVec_to_pathString(file_path.clone());
         let metadata_path_str = convert_pathVec_to_metaData_pathStr(file_path.clone());
-        let mut dotf = File::create(metadata_path_str.clone()).expect("no metadata file could be created");
 
-        println!("downloading new file, creating new metadata file: {}", metadata_path_str);
+        let mut dotf = try!(File::create(metadata_path_str.clone()));
+        try!(get_file_checksum(file_path.clone()).or_else(|_| {
+            println!("here");
+            Err(DriveError::Tester)
+        }).and_then(|current_file_checksum| {
+            self.verify_file_checksum(&fr, &current_file_checksum).and_then(|resp_string| {
+                try!(dotf.write_all(&resp_string.into_bytes()));
+                // this necessary for the sam reason that the Ok(()) at the bottom of the function is:
+                // a mixture of io::Result and another Result type in the try block
+                Ok(())
+            })
+        }).or_else(|_| -> Result<(), DriveError>  {
+                    // if the checksum matches that from Drive, then file is downloaded
+                    // correctly, and all we need to do is cache the checksum
+                    // the file data doesn't yet exist, so we'll download it from scratch
 
-        let mut f = File::create(new_path_str).unwrap();
+                    println!("downloading new file, creating new metadata file: {}", metadata_path_str);
 
-        let maybe_resp = self.client.get(&format!("https://www.googleapis.com/drive/v3/files/{}\
-                    ?alt=media", fr.id.clone()))
-                             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
-                             .send();
-        let mut resp = match maybe_resp {
-            Ok(resp) => resp,
-            Err(error) => {
-                panic!("error when receiving response during file download, {}", error);
-            }
-        };
+                    let mut f = try!(File::create(new_path_str));
 
-        let mut resp_string = Vec::<u8>::new();
-        match resp.read_to_end(&mut resp_string) {
-            Ok(_) => (),
-            Err(error) => panic!("error in reading response: {}", error)
-        }
-        println!("len: {}", resp_string.len());
-        f.write_all(&resp_string.clone());
+                    let mut resp = try!(self.client.get(&format!("https://www.googleapis.com/drive/v3/files/{}\
+                                ?alt=media", fr.id.clone()))
+                                         .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
+                                         .send());
 
-        let md5_result = {
-            let mut md5 = Md5::new();
-            md5.input(&resp_string);
-            md5.result_str()
-        };
+                    let mut resp_string = Vec::<u8>::new();
+                    try!(resp.read_to_end(&mut resp_string));
+                    println!("len: {}", resp_string.len());
+                    try!(f.write_all(&resp_string.clone()));
 
-        let (checksum_result, resp_string) = self.verify_file_checksum(fr, &md5_result);
-        if checksum_result {
-            dotf.write_all(&resp_string.into_bytes());
-            Ok(())
-        } else {
-            Err("downloaded checksums did not match".to_owned())
-        }
+                    let md5_result = {
+                        let mut md5 = Md5::new();
+                        md5.input(&resp_string);
+                        md5.result_str()
+                    };
+
+                    let resp_string = try!(self.verify_file_checksum(&fr, &md5_result));
+                    try!(dotf.write_all(&resp_string.into_bytes()));
+
+                    Ok(())
+            })
+        );
+
+        // i think this is necessary because get_file_checksum() has type io::Result, so it doesn't fit the type of the
+        // rest of the try block
+        Ok(())
     }
 
-    fn verify_file_checksum(&mut self, fr: FileResponse, checksum: &String) -> (bool, String) {
-        let (resp_string, resp) = self.send_authorized_request_to_json(
-            format!("https://www.googleapis.com/drive/v3/files/{}\
-                     ?fields=md5Checksum%2Csize", fr.id.clone()));
-        let fcr: FileCheckResponse = match resp {
-            Ok(fcr) => fcr,
-            Err(error) => {
-                println!("error when decoding filecheckresponse, {}, response: {}", error, resp_string.clone());
-                self.resolve_error(&resp_string);
-                match self.send_authorized_request_to_json(
-                    format!("https://www.googleapis.com/drive/v3/files/{}\
-                             ?fields=md5Checksum%2Csize", fr.id.clone())).1 {
-                    Ok(fcr) => fcr,
-                    Err(error) => {
-                        println!("no valid response from Drive, error: {}", error);
-                        return (false, resp_string.clone())
-                    }
-                }
-            }
-        };
+    fn verify_file_checksum(&mut self, fr: &FileResponse, checksum: &String) -> Result<String, DriveError> {
+        let mut resp = self.send_authorized_request((&format!(
+                        "https://www.googleapis.com/drive/v3/files/{}\
+                        ?fields=md5Checksum%2Csize"
+                        , fr.id.clone())));
+//                self.resolve_error(&resp_string);
+//                match self.send_authorized_request_to_json(
+//                    format!("https://www.googleapis.com/drive/v3/files/{}\
+//                             ?fields=md5Checksum%2Csize", fr.id.clone())).1 {
+//                    Ok(fcr) => fcr,
+//                    Err(error) => {
+//                        println!("no valid response from Drive, error: {}", error);
+//                        return (false, resp_string.clone())
+//                    }
+//                }
+
+        let mut resp_string = String::new();
+        try!(resp.read_to_string(&mut resp_string));
+        let fcr: FileCheckResponse = try!(json::decode(&resp_string));
 
         let same = checksum == &fcr.md5Checksum;
         if !same {
             println!("{} =? {}", checksum, fcr.md5Checksum);
             println!("same?: {:?}", same);
             println!("size: {}", fcr.size);
+            return Err(DriveError::JsonObjectify)
         }
-        (same, resp_string)
+        Ok(resp_string)
     }
 
-    fn send_authorized_request_to_json<T: Decodable>(&mut self, url: String) -> (String, Result<T, String>) {
+    fn send_authorized_request_to_json<T: Decodable>(&mut self, url: &str) -> Result<T, DriveError> {
         read_json_to_type(&mut self.send_authorized_request(url))
     }
 
-    fn send_authorized_request(&mut self, url: String) -> client::Response {
-        let maybe_resp = self.client.get(&url)
+    fn send_authorized_request(&mut self, url: &str) -> client::Response {
+        let maybe_resp = self.client.get(url)
                              .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
                              .send();
         match maybe_resp {
@@ -656,20 +643,20 @@ fn get_file_checksum(file_path: Vec<String>) -> io::Result<String> {
     let mut f = try!(File::open(convert_pathVec_to_pathString(file_path)));
     let mut f_str = String::new();
 
-    f.read_to_string(&mut f_str);
+    try!(f.read_to_string(&mut f_str));
 
     let mut md5 = Md5::new();
     md5.input_str(&f_str);
     Ok(md5.result_str())
 }
 
-fn read_json_to_type<J: Read, T: Decodable>(json: &mut J) -> (String, Result<T, String>) {
+fn read_json_to_type<J: Read, T: Decodable>(json: &mut J) -> Result<T, DriveError> {
         let mut resp_string = String::new();
         json.read_to_string(&mut resp_string);
-        (resp_string.clone(), match json::decode(&resp_string) {
+        match json::decode(&resp_string) {
             Ok(t) => Ok(t),
-            Err(error) => Err(format!("{}", error))
-        })
+            Err(err) => Err(DriveError::JsonCannotDecode(err))
+        }
 }
 
 fn request_new_access_code(c: &Client) -> (TokenResponse, String) {

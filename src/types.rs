@@ -1,8 +1,15 @@
 #![allow(non_snake_case)] // to simplify json decoding for the Response types
 
+extern crate hyper;
+extern crate rustc_serialize;
+extern crate std;
+
 use rustc_serialize::json::{Json, ToJson};
+use rustc_serialize::{json, Decodable};
 
 use std::collections::BTreeMap;
+use std::io;
+use hyper::error;
 
 #[derive (RustcDecodable, Debug, Clone)]
 pub struct TokenResponse {
@@ -64,10 +71,47 @@ pub struct FileCheckResponse {
 }
 
 #[derive (Clone)]
-pub struct AuthData {
+pub struct AuthData<'a> {
     pub tr: TokenResponse,
     pub client_id: String,
     pub client_secret: String,
     // maybe this can be converted to a std::path::Path later?
-    pub cache_file_path: String,
+    pub cache_file_path: &'a str,
+}
+
+#[derive (Debug)]
+pub enum DriveError {
+    Hyper(hyper::error::Error),
+    JsonReadError(rustc_serialize::json::BuilderError),
+    JsonObjectify,
+    JsonInvalidAttribute,
+    JsonCannotConvertToArray,
+    JsonCannotDecode(rustc_serialize::json::DecoderError),
+    Io(std::io::Error),
+    UnsupportedDocumentType,
+    Tester,
+}
+
+impl From<hyper::error::Error> for DriveError {
+    fn from(err: hyper::error::Error) -> DriveError {
+        DriveError::Hyper(err)
+    }
+}
+
+impl From<rustc_serialize::json::BuilderError> for DriveError {
+    fn from(err: rustc_serialize::json::BuilderError) -> DriveError {
+        DriveError::JsonReadError(err)
+    }
+}
+
+impl From<rustc_serialize::json::DecoderError> for DriveError {
+    fn from(err: rustc_serialize::json::DecoderError) -> DriveError {
+        DriveError::JsonCannotDecode(err)
+    }
+}
+
+impl From<std::io::Error> for DriveError {
+    fn from(err: std::io::Error) -> DriveError {
+        DriveError::Io(err)
+    }
 }
