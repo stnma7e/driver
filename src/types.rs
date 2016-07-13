@@ -80,8 +80,9 @@ pub struct AuthData<'a> {
 }
 
 #[derive (Debug)]
-pub enum DriveError {
+pub enum DriveErrorType {
     Hyper(hyper::error::Error),
+    JsonDecodeFileList,
     JsonReadError(rustc_serialize::json::BuilderError),
     JsonObjectify,
     JsonInvalidAttribute,
@@ -89,29 +90,49 @@ pub enum DriveError {
     JsonCannotDecode(rustc_serialize::json::DecoderError),
     Io(std::io::Error),
     UnsupportedDocumentType,
+    FailedChecksum,
+    FailedToChecksumExistingFile,
     Tester,
+}
+
+#[derive (Debug)]
+pub struct DriveError {
+    pub kind: DriveErrorType,
+    pub response: Option<String>,
 }
 
 impl From<hyper::error::Error> for DriveError {
     fn from(err: hyper::error::Error) -> DriveError {
-        DriveError::Hyper(err)
+        DriveError {
+            kind: DriveErrorType::Hyper(err),
+            response: None
+        }
     }
 }
 
 impl From<rustc_serialize::json::BuilderError> for DriveError {
     fn from(err: rustc_serialize::json::BuilderError) -> DriveError {
-        DriveError::JsonReadError(err)
+        DriveError {
+            kind: DriveErrorType::JsonReadError(err),
+            response: None
+        }
     }
 }
 
 impl From<rustc_serialize::json::DecoderError> for DriveError {
     fn from(err: rustc_serialize::json::DecoderError) -> DriveError {
-        DriveError::JsonCannotDecode(err)
+        DriveError {
+            kind: DriveErrorType::JsonCannotDecode(err),
+            response: None
+        }
     }
 }
 
 impl From<std::io::Error> for DriveError {
     fn from(err: std::io::Error) -> DriveError {
-        DriveError::Io(err)
+        DriveError {
+            kind: DriveErrorType::Io(err),
+            response: None
+        }
     }
 }

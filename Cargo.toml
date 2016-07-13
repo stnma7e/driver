@@ -6,7 +6,6 @@ authors = ["Sam Delmerico <svdelmerico@gmail.com>"]
 [dependencies]
 hyper           = "0.9.6"
 mime            = "0.2.0"
-rustc-serialize = "0.3.19"
 itertools       = "0.4"
 rust-crypto     = "^0.2"
 fuse            = "0.2.7"
@@ -15,3 +14,6 @@ libc            = "0.2.11"
 
 [dependencies.url]
 git = "https://github.com/servo/rust-url"
+
+[dependencies.rustc-serialize]
+git = "https://github.com/rust-lang-nursery/rustc-serialize"
