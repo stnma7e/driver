@@ -5,11 +5,7 @@ extern crate rustc_serialize;
 extern crate std;
 
 use rustc_serialize::json::{Json, ToJson};
-use rustc_serialize::{json, Decodable};
-
 use std::collections::BTreeMap;
-use std::io;
-use hyper::error;
 
 #[derive (RustcDecodable, Debug, Clone)]
 pub struct TokenResponse {

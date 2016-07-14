@@ -52,10 +52,11 @@ fn main() {
         inode_map: HashMap::new(),
         child_map: HashMap::new(),
         current_inode: 1,
+        root_folder: "rot"
     };
 
 //    let root_folder = (vec![], "0B7TtU3YsiIjTTS1oUE5wZFpsYVk");
-    let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTWjBOM0YwYkVBa1U");
+    let root_folder = (vec![ft.root_folder.to_string()], "0B7TtU3YsiIjTWjBOM0YwYkVBa1U");
 //    let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTeHJGR1VKMHB3cWs");
 
     // we're probably dealing with the root folder, so we need to make it's own parent

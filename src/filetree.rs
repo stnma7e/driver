@@ -25,6 +25,7 @@ pub struct FileTree<'a> {
     pub child_map: HashMap<u64, Vec<u64>>,
     pub inode_map: HashMap<u64, FileResponse>,
     pub current_inode: u64,
+    pub root_folder: &'a str,
 }
 
 impl<'a> FileTree<'a> {
@@ -238,21 +239,18 @@ impl<'a> FileTree<'a> {
                 // we'll open our access_cache file to read its current contents
                 let mut f = try!(File::open(self.auth_data.cache_file_path.clone()));
                 let mut access_string = String::new();
-                try!(f.read_to_string(&mut access_string).and_then(|_| {
+                try!(f.read_to_string(&mut access_string).map_err(From::from).and_then(|_| -> Result<(), DriveError> {
                     // if the current access file reads as it should, we'll copy the
                     // current token response and edit the   access_token field for later use
-                    let mut tr: TokenResponse = match json::decode(&access_string) {
-                        Ok(tr) => tr,
-                        Err(error) => panic!()
-                    };
+                    let mut tr: TokenResponse = try!(json::decode(&access_string));
                     tr.access_token = self.auth_data.tr.access_token.clone();
                     let tr_json = tr.to_json();
                     let tr_str = format!("{}", as_pretty_json(&tr_json));
 
                     // then we'll truncate the file and paste in the updated token response
                     // preserving all the other unused data
-                    let mut f = try!(File::create(self.auth_data.cache_file_path.clone()));
-                    f.write_all(tr_str.as_bytes())
+                    let mut f: File = try!(File::create(self.auth_data.cache_file_path.clone()).map_err(From::from) as Result<File, DriveError>);
+                    f.write_all(tr_str.as_bytes()).map_err(From::from)
                 }))
             }
         }
