@@ -2,10 +2,14 @@
 
 extern crate hyper;
 extern crate rustc_serialize;
+extern crate libc;
 extern crate std;
+extern crate uuid;
 
 use rustc_serialize::json::{Json, ToJson};
 use std::collections::BTreeMap;
+use std::path::{PathBuf, Path};
+pub use fuse::FileType;
 
 #[derive (RustcDecodable, Debug, Clone)]
 pub struct TokenResponse {
@@ -29,17 +33,38 @@ impl ToJson for TokenResponse {
 }
 
 #[derive (RustcDecodable, Debug, Clone)]
-pub struct FileResponse {
+pub struct DriveFileResponse {
     pub kind: String,
     pub id: String,
     pub name: String,
     pub mimeType: String,
-    pub inode: Option<u64>,
-    pub path_string: Option<String>,
-    pub size: Option<u64>,
 }
 
-impl ToJson for FileResponse {
+#[derive (Debug, Clone)]
+pub enum SourceData {
+    Drive(DriveFileResponse),
+}
+
+#[derive (Debug, Clone)]
+pub struct FileResponse {
+    pub uuid: uuid::Uuid,
+    pub kind: FileType,
+    pub name: String,
+    pub source_data: SourceData,
+}
+
+#[derive (Debug, Clone)]
+pub struct FileData {
+    pub id: uuid::Uuid,
+    pub kind: FileType,
+    pub path: PathBuf,
+    pub inode: u64,
+    pub parent_inode: u64,
+    pub size: Option<u64>,
+    pub source_data: SourceData,
+}
+
+impl ToJson for DriveFileResponse {
     fn to_json(&self) -> Json {
         let mut d = BTreeMap::new();
         // All standard types implement `to_json()`, so use it
@@ -60,19 +85,19 @@ pub struct ErrorDetailsResponse {
     pub location: String,
 }
 
-#[derive (RustcDecodable, Debug, Clone)]
+#[derive (RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct FileCheckResponse {
     pub md5Checksum: String,
     pub size: String,
 }
 
 #[derive (Clone)]
-pub struct AuthData<'a> {
+pub struct AuthData {
     pub tr: TokenResponse,
     pub client_id: String,
     pub client_secret: String,
     // maybe this can be converted to a std::path::Path later?
-    pub cache_file_path: &'a str,
+    pub cache_file_path: String,
 }
 
 #[derive (Debug)]
@@ -84,11 +109,14 @@ pub enum DriveErrorType {
     JsonInvalidAttribute,
     JsonCannotConvertToArray,
     JsonCannotDecode(rustc_serialize::json::DecoderError),
+    JsonCannotEncode(rustc_serialize::json::EncoderError),
     Io(std::io::Error),
     UnsupportedDocumentType,
     FailedChecksum,
     FailedToChecksumExistingFile,
     Tester,
+    NoFileName,
+    FailedUuidLookup,
 }
 
 #[derive (Debug)]
@@ -129,6 +157,15 @@ impl From<std::io::Error> for DriveError {
         DriveError {
             kind: DriveErrorType::Io(err),
             response: None
+        }
+    }
+}
+
+impl From<rustc_serialize::json::EncoderError> for DriveError {
+    fn from(err: rustc_serialize::json::EncoderError) -> DriveError {
+        DriveError {
+            kind: DriveErrorType::JsonCannotEncode(err),
+            response: None,
         }
     }
 }
