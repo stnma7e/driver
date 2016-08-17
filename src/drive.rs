@@ -15,7 +15,7 @@ use crypto::md5::Md5;
 use crypto::digest::Digest;
 
 use std::fs::{File, OpenOptions};
-use std::path::{Path};
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -26,15 +26,15 @@ pub struct DriveFileDownloader {
     pub client: Client,
     pub auth_data: AuthData,
 
-    uuid_map: HashMap<Uuid, String>,
+    uuid_map: HashMap<Uuid, DriveFileResponse>,
 }
 
 const CACHE_FILE: &'static str = "access";
-const CLIENT_ID: &'static str = "460434421766-0sktb0rkbvbko8omj8vhu8vv83giraao.apps.googleusercontent.com";
-const CLIENT_SECRET: &'static str = "m_ILEPtnZI53tXow9hoaabjm";
+const CLIENT_ID: &'static str = "";
+const CLIENT_SECRET: &'static str = "";
 
 impl DriveFileDownloader {
-    pub fn new(root_uuid: Uuid, root_id: String) -> Result<DriveFileDownloader, DriveError> {
+    pub fn new(root_uuid: Uuid, root_id: String, file_path: PathBuf) -> Result<DriveFileDownloader, DriveError> {
         let c = Client::new();
 
         let mut handle = try!(OpenOptions::new()
@@ -56,7 +56,13 @@ impl DriveFileDownloader {
         };
 
         let mut uuid_map = HashMap::new();
-        uuid_map.insert(root_uuid, root_id);
+        uuid_map.insert(root_uuid, DriveFileResponse {
+            kind: "".to_string(),
+            id: root_id,
+            name: "root".to_string(),
+            mimeType: "application/vnd.google-apps.folder".to_string(),
+            path: Some(file_path),
+        });
 
         Ok(DriveFileDownloader {
             client: c,
@@ -69,16 +75,105 @@ impl DriveFileDownloader {
             uuid_map: uuid_map,
         })
     }
+
+    fn download_file(&self, uuid: &Uuid, parent_uuid: &Uuid) -> Result<u64, DriveError> {
+        let fr = try!(self.uuid_map.get(uuid).ok_or(DriveError {
+            kind: DriveErrorType::FailedUuidLookup,
+            response: None,
+        })).clone();
+        let parent_path = try!(self.uuid_map.get(parent_uuid).ok_or(DriveError {
+            kind: DriveErrorType::FailedUuidLookup,
+            response: None,
+        })).path.clone();
+
+        if fr.mimeType == "application/vnd.google-apps.document"
+        || fr.mimeType == "application/vnd.google-apps.form"
+        || fr.mimeType == "application/vnd.google-apps.drawing"
+        || fr.mimeType == "application/vnd.google-apps.fusiontable"
+        || fr.mimeType == "application/vnd.google-apps.map"
+        || fr.mimeType == "application/vnd.google-apps.presentation"
+        || fr.mimeType == "application/vnd.google-apps.spreadsheet"
+        || fr.mimeType == "application/vnd.google-apps.sites" {
+            println!("unsupported google filetype");
+            return Err(DriveError {
+                kind: DriveErrorType::UnsupportedDocumentType,
+                response: None
+            })
+        }
+
+        let mut file_path = try!(parent_path.ok_or(DriveError {
+            kind: DriveErrorType::NoPathForParent,
+            response: None,
+        }));
+        file_path.push(fr.name.clone());
+        let mut metadata_path_str = file_path.clone();
+        metadata_path_str.set_file_name(".".to_string() + &fr.name);
+
+        let mut dotf = try!(File::create(metadata_path_str.clone()));
+
+        // we'll checksum the file (if we have it) on the system, and compare it to the
+        // server, if all is OK, create a new metadata file
+        let size = try!(get_file_checksum(&file_path).or_else(|_| {
+            println!("no file checksum yet");
+            Err(DriveError {
+                kind: DriveErrorType::FailedToChecksumExistingFile,
+                response: None
+            })
+        }).and_then(|current_file_checksum| {
+            self.verify_checksum(uuid, &current_file_checksum)
+            .and_then(|check_response| {
+                let fcr_string = try!(json::encode(&check_response));
+                try!(dotf.write_all(&fcr_string.into_bytes()));
+                let size = check_response.size.parse::<u64>().expect("couldn't unwrap size in filecheck");
+                Ok(size) // this Ok(()) is necessary for the sam reason that the Ok(()) at the bottom of the function is:
+                         // a mixture of io::Result and another Result type in the try block
+            })
+        }).or_else(|_| -> Result<u64, DriveError>  {
+                    // if the checksum matches that from Drive, then file is downloaded
+                    // correctly, and all we need to do is cache the checksum
+                    // the file data doesn't yet exist, so we'll download it from scratch
+                    println!("downloading new file, creating new metadata file: {:?}", metadata_path_str);
+
+                    let mut f = try!(File::create(file_path.clone()));
+                    let mut resp = try!(self.client.get(&format!("https://www.googleapis.com/drive/v3/files/{}\
+                                ?alt=media", fr.id.clone()))
+                                         .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
+                                         .send());
+
+                    let mut resp_string = Vec::<u8>::new();
+                    try!(resp.read_to_end(&mut resp_string));
+                    println!("len: {}", resp_string.len());
+                    try!(f.write_all(&resp_string.clone()));
+
+                    let md5_result = {
+                        let mut md5 = Md5::new();
+                        md5.input(&resp_string);
+                        md5.result_str()
+                    };
+
+                    let check_response = try!(self.verify_checksum(uuid, &md5_result));
+                    let fcr_string = try!(json::encode(&check_response));
+                    try!(dotf.write_all(&fcr_string.into_bytes()));
+
+                    let size = check_response.size.parse::<u64>().expect("couldn't unwrap size in filecheck");
+                    Ok(size)
+            })
+        );
+
+        // i think this is necessary because get_file_checksum() has type io::Result, so it doesn't fit the type of the
+        // rest of the try block
+        Ok(size)
+    }
 }
 
 impl FileDownloader for DriveFileDownloader {
     fn get_file_list(&mut self, root_folder_uuid: &uuid::Uuid) -> Result<Vec<FileResponse>, DriveError> {
         let mut resp = {
-            let root_folder_id =
+            let ref root_folder_id =
                 try!(self.uuid_map.get(root_folder_uuid).ok_or(DriveError{
                 kind: DriveErrorType::FailedUuidLookup,
                 response: None,
-            }));
+            })).id;
             try!(self.client.get(&format!("https://www.googleapis.com/drive/v3/files\
                               ?corpus=domain\
                               &pageSize=100\
@@ -131,7 +226,7 @@ impl FileDownloader for DriveFileDownloader {
 
             let uuid = Uuid::new_v4();
             {
-                self.uuid_map.insert(uuid, fr.id.clone());
+                self.uuid_map.insert(uuid, fr.clone());
             }
 
             files.push(FileResponse {
@@ -240,81 +335,111 @@ impl FileDownloader for DriveFileDownloader {
         Ok(())
     }
 
-    fn create_new_file(&mut self, fd: &FileData, file_path: &Path, metadata_path_str:&Path) -> Result<u64, DriveError> {
-        let SourceData::Drive(ref fr) = fd.source_data;
-        if fr.mimeType == "application/vnd.google-apps.document"
-           || fr.mimeType == "application/vnd.google-apps.form"
-           || fr.mimeType == "application/vnd.google-apps.drawing"
-           || fr.mimeType == "application/vnd.google-apps.fusiontable"
-           || fr.mimeType == "application/vnd.google-apps.map"
-           || fr.mimeType == "application/vnd.google-apps.presentation"
-           || fr.mimeType == "application/vnd.google-apps.spreadsheet"
-           || fr.mimeType == "application/vnd.google-apps.sites" {
-            println!("unsupported google filetype");
-            return Err(DriveError {
-                kind: DriveErrorType::UnsupportedDocumentType,
-                response: None
-            })
+    fn retreive_file(&mut self, uuid: &Uuid, parent_uuid: &Uuid) -> Result<u64, DriveError> {
+        let fr = try!(self.uuid_map.get(uuid).ok_or(DriveError {
+            kind: DriveErrorType::FailedUuidLookup,
+            response: None,
+        })).clone();
+        let parent_path = try!(self.uuid_map.get(parent_uuid).ok_or(DriveError {
+            kind: DriveErrorType::FailedUuidLookup,
+            response: None,
+        })).path.clone();
+
+        let mut file_path = try!(parent_path.ok_or(DriveError {
+            kind: DriveErrorType::NoPathForParent,
+            response: None,
+        }));
+        file_path.push(fr.name.clone());
+        let mut metadata_path_str = file_path.clone();
+        metadata_path_str.set_file_name(".".to_string() + &fr.name);
+
+        {
+            let fr = self.uuid_map.get_mut(uuid).unwrap();
+            fr.path = Some(file_path.clone());
+            if fr.mimeType == "application/vnd.google-apps.folder" {
+                return Ok(0)
+            }
         }
 
+        // try to open the metadata file, if it already exists
+        let size = match File::open(metadata_path_str.clone()) {
+            Err(_) => {
+            // the metadata file doesn't yet exist, so the file shouldn't exist either because the
+            // two files are created at the same time in create_new_file(), so we'll download it
+                try!(self.download_file(uuid, parent_uuid))
+            },
+
+            Ok(mut dotf) => {
+            // if it does, we'll read the file to see if the checksum matches what we have on
+            // the server
+                let fc = try!((read_json_to_type(&mut dotf) as Result<FileCheckResponse, DriveError>).or_else(|err| {
+                    println!("{:?}", err);
+                    let mut file_string = String::new();
+                    try!(dotf.read_to_string(&mut file_string));
+                    Err(DriveError {
+                        kind: DriveErrorType::Tester,
+                        response: Some(file_string)
+                    })
+                }));
+                try!(self.verify_checksum(uuid, &fc.md5Checksum)
+                    .or_else(|_| -> Result<FileCheckResponse, DriveError> {
+                        // if the checksum fails, we need to redownload it
+                        println!("updating metadata for {:?}", file_path);
+                        try!(self.download_file(uuid, parent_uuid));
+                        self.verify_checksum(uuid, &fc.md5Checksum)
+                    })
+                );
+
+                fc.size.parse::<u64>().unwrap()
+            }
+        };
+
+        Ok(size)
+    }
+
+    fn create_local_file(&mut self, fd: &FileData, file_path: &Path, metadata_path_str: &Path) -> Result<u64, DriveError> {
+        let fr = match fd.source_data {
+            SourceData::Drive(ref fr)=> fr,
+            _ => panic!("fdafasdf")
+        };
+
         let mut dotf = try!(File::create(metadata_path_str.clone()));
+        let fcr_string = try!(json::encode(&FileCheckResponse {
+            size: "0".to_string(),
+            md5Checksum: "d41d8cd98f00b204e9800998ecf8427e".to_string()
+            // seems to be the checksum of an empty file
+        }));
+        try!(dotf.write_all(&fcr_string.into_bytes()));
 
-        // if the metadata file exists, but doesn't read (there was probably some corruption),
-        // we'll checksum the file (if we have it) on the system, and compare it to the
-        // server, if all is OK, create a new metadata file
-        try!(get_file_checksum(file_path).or_else(|_| {
-            println!("no file checksum yet");
-            Err(DriveError {
-                kind: DriveErrorType::FailedToChecksumExistingFile,
-                response: None
-            })
-        }).and_then(|current_file_checksum| {
-            self.verify_checksum(&fd, &current_file_checksum).and_then(|check_response| {
-                let fcr_string = try!(json::encode(&check_response));
-                try!(dotf.write_all(&fcr_string.into_bytes()));
-                let size = check_response.size.parse::<u64>().expect("couldn't unwrap size in filecheck");
-                Ok(size) // this Ok(()) is necessary for the sam reason that the Ok(()) at the bottom of the function is:
-                       // a mixture of io::Result and another Result type in the try block
-            })
-        }).or_else(|_| -> Result<u64, DriveError>  {
-                    // if the checksum matches that from Drive, then file is downloaded
-                    // correctly, and all we need to do is cache the checksum
-                    // the file data doesn't yet exist, so we'll download it from scratch
-                    println!("downloading new file, creating new metadata file: {:?}", metadata_path_str);
-
-                    let mut f = try!(File::create(file_path));
-                    let mut resp = try!(self.client.get(&format!("https://www.googleapis.com/drive/v3/files/{}\
-                                ?alt=media", fr.id.clone()))
-                                         .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
-                                         .send());
-
-                    let mut resp_string = Vec::<u8>::new();
-                    try!(resp.read_to_end(&mut resp_string));
-                    println!("len: {}", resp_string.len());
-                    try!(f.write_all(&resp_string.clone()));
-
-                    let md5_result = {
-                        let mut md5 = Md5::new();
-                        md5.input(&resp_string);
-                        md5.result_str()
-                    };
-
-                    let check_response = try!(self.verify_checksum(&fd, &md5_result));
-                    let fcr_string = try!(json::encode(&check_response));
-                    try!(dotf.write_all(&fcr_string.into_bytes()));
-
-                    let size = check_response.size.parse::<u64>().expect("couldn't unwrap size in filecheck");
-                    Ok(size)
-            })
-        );
-
-        // i think this is necessary because get_file_checksum() has type io::Result, so it doesn't fit the type of the
-        // rest of the try block
+        try!(File::create(file_path));
         Ok(0)
     }
 
-    fn verify_checksum(&mut self, fd: &FileData, checksum: &String) -> Result<FileCheckResponse, DriveError> {
-        let SourceData::Drive(ref fr) = fd.source_data;
+    fn read_file(&self, uuid: &Uuid) -> Result<Vec<u8>, DriveError> {
+        let fr = try!(self.uuid_map.get(uuid).ok_or(DriveError {
+            kind: DriveErrorType::FailedUuidLookup,
+            response: None,
+        }));
+        let path = try!(fr.path.clone().ok_or(DriveError {
+            kind: DriveErrorType::FileNotYetDownloaded,
+            response: None,
+        }));
+
+        let mut handle = try!(File::open(&path));
+        let mut data = Vec::<u8>::new();
+        match handle.read_to_end(&mut data) {
+            Ok(_) => (),
+            Err(error) => println!("couldnt read file handle, {}: error, {}", path.to_string_lossy(), error),
+        };
+
+        Ok(data)
+    }
+
+    fn verify_checksum(&self, uuid: &Uuid, checksum: &String) -> Result<FileCheckResponse, DriveError> {
+        let fr = try!(self.uuid_map.get(uuid).ok_or(DriveError {
+            kind: DriveErrorType::FailedUuidLookup,
+            response: None
+        }));
         let mut resp = try!(self.client
             .get(&format!(
                 "https://www.googleapis.com/drive/v3/files/{}\
@@ -368,5 +493,11 @@ pub fn request_new_access_code(c: &Client) -> Result<TokenResponse, DriveError> 
 
     let mut resp_string = String::new();
     try!(resp.read_to_string(&mut resp_string));
+    json::decode(&resp_string).map_err(From::from)
+}
+
+fn read_json_to_type<J: Read, T: Decodable>(json: &mut J) -> Result<T, DriveError> {
+    let mut resp_string = String::new();
+    try!(json.read_to_string(&mut resp_string));
     json::decode(&resp_string).map_err(From::from)
 }

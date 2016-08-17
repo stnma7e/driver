@@ -10,6 +10,7 @@ use rustc_serialize::json::{Json, ToJson};
 use std::collections::BTreeMap;
 use std::path::{PathBuf, Path};
 pub use fuse::FileType;
+use fuse::FileAttr;
 
 #[derive (RustcDecodable, Debug, Clone)]
 pub struct TokenResponse {
@@ -34,14 +35,16 @@ impl ToJson for TokenResponse {
 
 #[derive (RustcDecodable, Debug, Clone)]
 pub struct DriveFileResponse {
-    pub kind: String,
+    pub kind: String, // essentially unused, will ostensibly always be "drive#file"
     pub id: String,
     pub name: String,
     pub mimeType: String,
+    pub path: Option<PathBuf>,
 }
 
 #[derive (Debug, Clone)]
 pub enum SourceData {
+    CreatedFile,
     Drive(DriveFileResponse),
 }
 
@@ -56,11 +59,9 @@ pub struct FileResponse {
 #[derive (Debug, Clone)]
 pub struct FileData {
     pub id: uuid::Uuid,
-    pub kind: FileType,
     pub path: PathBuf,
-    pub inode: u64,
     pub parent_inode: u64,
-    pub size: Option<u64>,
+    pub attr: FileAttr,
     pub source_data: SourceData,
 }
 
@@ -117,6 +118,9 @@ pub enum DriveErrorType {
     Tester,
     NoFileName,
     FailedUuidLookup,
+    NoSuchInode,
+    NoPathForParent,
+    FileNotYetDownloaded,
 }
 
 #[derive (Debug)]
