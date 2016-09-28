@@ -52,10 +52,13 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
             reply.add(ino, 0, FileType::Directory, &Path::new("."));
             reply.add(*self.parent_map.get(&ino).expect(&format!("no parent inode for {}", ino)), 1, FileType::Directory, &Path::new(".."));
 
+            let mut new_offest = 1;
             if let Some(children) = self.child_map.get(&ino) {
+                new_offest += 1;
+
                 for child_inode in children {
                     if let Some(child) = self.inode_map.get(&child_inode) {
-                        reply.add(*child_inode, *child_inode, child.attr.kind, &child.path.file_name().expect(&format!("no file_name {:?}", child)));
+                        reply.add(*child_inode, new_offest, child.attr.kind, &child.path.file_name().expect(&format!("no file_name {:?}", child)));
                     } else {
                         println!("no inode for child {:?}, parent {:?}", child_inode, children);
                         panic!()
@@ -111,23 +114,7 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
     // implement open flags with file handle later
     fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         println!("open(ino={})", ino);
-
-        if let Some(fd) = self.inode_map.get(&ino) {
-            match File::open(&fd.path) {
-                Ok(handle) => {
-                    let h = handle.into_raw_fd();
-                    reply.opened(h as u64, flags);
-                    return
-                }
-                Err(error) => {
-                    println!("no downloaded file for {}, err: {:?}", fd.path.to_string_lossy(), error);
-                }
-            }
-        } else {
-            println!("no inode found in map, {}", ino);
-        }
-
-        reply.error(ENOENT);
+        reply.opened(0, flags)
     }
 
     fn forget(&mut self, _req: &Request, _ino: u64, _nlookup: u64) {
@@ -181,7 +168,7 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
                     return
                 }
                 Err(error) => {
-                    println!("no downloaded file for root, {}, err: {:?}", self.root_folder, error);
+                    println!("no downloaded folder for root, {}, err: {:?}", self.root_folder, error);
                 }
             }
         }
@@ -194,14 +181,15 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
                     return
                 }
                 Err(error) => {
-                    println!("no downloaded file for {}, err: {:?}", fd.path.to_string_lossy(), error);
+                    //println!("no downloaded folder for {}, err: {:?}", fd.path.to_string_lossy(), error);
                 }
             }
         } else {
             println!("no inode found in map, {}", ino);
         }
 
-        reply.error(ENOENT);
+//         reply.error(ENOENT);
+        reply.opened(0, _flags)
     }
 
     fn releasedir(&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: u32, reply: ReplyEmpty) {

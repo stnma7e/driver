@@ -5,10 +5,11 @@ extern crate rustc_serialize;
 extern crate libc;
 extern crate std;
 extern crate uuid;
+extern crate rusqlite;
 
 use rustc_serialize::json::{Json, ToJson};
 use std::collections::BTreeMap;
-use std::path::{PathBuf, Path};
+use std::path::{PathBuf};
 pub use fuse::FileType;
 use fuse::FileAttr;
 
@@ -82,14 +83,12 @@ pub struct ErrorDetailsResponse {
     pub domain: String,
     pub reason: String,
     pub message: String,
-    pub locationType: String,
-    pub location: String,
 }
 
 #[derive (RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct FileCheckResponse {
     pub md5Checksum: String,
-    pub size: String,
+    pub size: u64,
 }
 
 #[derive (Clone)]
@@ -104,6 +103,7 @@ pub struct AuthData {
 #[derive (Debug)]
 pub enum DriveErrorType {
     Hyper(hyper::error::Error),
+    Rusqlite(rusqlite::Error),
     JsonDecodeFileList,
     JsonReadError(rustc_serialize::json::BuilderError),
     JsonObjectify,
@@ -133,6 +133,15 @@ impl From<hyper::error::Error> for DriveError {
     fn from(err: hyper::error::Error) -> DriveError {
         DriveError {
             kind: DriveErrorType::Hyper(err),
+            response: None
+        }
+    }
+}
+
+impl From<rusqlite::Error> for DriveError {
+    fn from(err: rusqlite::Error) -> DriveError {
+        DriveError {
+            kind: DriveErrorType::Rusqlite(err),
             response: None
         }
     }

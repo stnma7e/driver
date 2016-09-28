@@ -11,6 +11,7 @@ rust-crypto     = "^0.2"
 fuse            = "0.2.7"
 time            = "0.1.35"
 libc            = "0.2.11"
+rusqlite        = "0.7.3"
 
 [dependencies.url]
 git = "https://github.com/servo/rust-url"
