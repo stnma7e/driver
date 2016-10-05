@@ -7,6 +7,8 @@ extern crate itertools;
 extern crate mime;
 extern crate crypto;
 extern crate uuid;
+extern crate rusqlite;
+#[macro_use] extern crate url;
 
 pub mod types;
 pub mod fs;

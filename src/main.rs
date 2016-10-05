@@ -34,9 +34,13 @@ fn main() {
         conn.query_row("SELECT uuid FROM files WHERE ino=1", &[]
         , |row| -> Uuid {
             Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).expect("Fdafkn")
-        }).unwrap_or_else(|_| {
-            Uuid::new_v4()
-        })
+        }).unwrap_or(Uuid::new_v4())
+    };
+    let last_ino = {
+        conn.query_row("SELECT ino FROM FILES
+                        WHERE ino = (SELECT MAX(ino) FROM files)"
+            , &[] , |row| -> u64 { (row.get::<i32, i64>(0) + 1) as u64 }
+        ).unwrap_or(root_folder_inode)
     };
 
     let mut fd = DriveFileDownloader::new(
@@ -50,7 +54,7 @@ fn main() {
         inode_map: HashMap::new(),
         child_map: HashMap::new(),
         parent_map: HashMap::new(),
-        current_inode: root_folder_inode,
+        current_inode: last_ino,
         root_folder: root_folder_name,
         file_downloader: &mut fd,
         conn: conn,

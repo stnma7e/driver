@@ -2,6 +2,10 @@ extern crate uuid;
 extern crate std;
 extern crate rusqlite;
 
+use url::percent_encoding::{utf8_percent_encode, QUERY_ENCODE_SET};
+use time;
+use time::{Timespec, Tm};
+
 use hyper::{Client};
 use hyper::header::{ContentType, Authorization, Bearer};
 use mime::{Mime, TopLevel, SubLevel};
@@ -67,7 +71,12 @@ impl DriveFileDownloader {
                            VALUES ($1, $2, $3)",
                            &[&root_id,
                            &root_uuid.clone().as_bytes().to_vec(),
-                           &file_path.to_str().unwrap()]).unwrap_or(0);
+                           &file_path.to_str().unwrap()]).unwrap_or_else(
+            |err| {
+                println!("root probably already in drive db, err: {:?}", err);
+                0
+            }
+        );
 
         let mut uuid_map = HashMap::new();
         uuid_map.insert(root_uuid, DriveFileResponse {
@@ -124,27 +133,17 @@ impl DriveFileDownloader {
 
         // we'll checksum the file (if we have it) on the system, and compare it to the
         // server, if all is OK, create a new metadata file
-        let maybe_checksum = try!(self.conn.query_row_named("SELECT checksum FROM files WHERE uuid=:uuid",
+        let (maybe_checksum, maybe_path) = try!(self.conn.query_row_named("SELECT checksum, path FROM files WHERE uuid=:uuid",
             &[(":uuid", &uuid.clone().as_bytes().to_vec())]
-            , |row| -> (Option<String>) {
-                row.get(0)
+            , |row| -> (Option<String>, Option<PathBuf>) {
+                ( row.get(0)
+                , if let Some(path) = row.get::<i32, Option<String>>(1) {
+                    Some(Path::new(&path).to_owned())
+                } else { None } )
             }
         ));
 
-        let resp = if let Some(checksum) = maybe_checksum {
-            try!(self.verify_checksum(uuid, &checksum)
-            .and_then(|check_response| {
-                let size = check_response.size;
-                Ok(DownloadedFileInformation {
-                    size: size,
-                    path: file_path.clone(),
-                    checksum: checksum,
-                }) // this Ok(()) is necessary for the sam reason that the Ok(()) at the bottom of the function is:
-                   // a mixture of io::Result and another Result type in the try block
-            }))
-        } else {
-            // if the checksum matches that from Drive, then file is downloaded
-            // correctly, and all we need to do is cache the checksum
+        let fn_download_file = |file_path: PathBuf| {
             // the file data doesn't yet exist, so we'll download it from scratch
             println!("downloading new file, creating new file: {:?}", file_path);
 
@@ -177,38 +176,86 @@ impl DriveFileDownloader {
                                &uuid.clone().as_bytes().to_vec(),
                              ]).unwrap();
 
-            DownloadedFileInformation {
+            Ok(DownloadedFileInformation {
                 size: size,
                 checksum: md5_result,
                 path: file_path,
-            }
+            })
         };
 
-        // i think this is necessary because get_file_checksum() has type io::Result, so it doesn't fit the type of the
-        // rest of the try block
-        Ok(resp)
+        if let Some(checksum) = maybe_checksum {
+            // if the checksum matches that from Drive, then file is downloaded
+            // correctly, and all we need to do is cache the checksum
+            self.verify_checksum(uuid, &checksum)
+            .and_then(|check_response| {
+                Ok(DownloadedFileInformation {
+                    size: check_response.size,
+                    path: file_path.clone(),
+                    checksum: checksum,
+                })
+            })
+        } else if let Some(path) = maybe_path {
+            // if we have a path for the file, we can chcek to see if any local data is
+            // already valid
+            get_file_checksum(&path).and_then(|ck| {
+                // check with Drive for a the valid checksum
+                self.verify_checksum(uuid, &ck)
+                .and_then(|check_response| {
+                    Ok(DownloadedFileInformation {
+                        size: check_response.size,
+                        path: file_path.clone(),
+                        checksum: ck,
+                    })
+                })
+            }).or_else(|_| {
+                fn_download_file(file_path.clone())
+            })
+        } else {
+            // we have neither a path for local data, nor a local checksum
+            fn_download_file(file_path.clone())
+        }
     }
+}
+
+define_encode_set! {
+    /// This encode set is used in the URL parser for query strings.
+    pub DRIVE_QUERY_ENCODE_SET = [QUERY_ENCODE_SET] | {':'}
 }
 
 impl FileDownloader for DriveFileDownloader {
     fn get_file_list(&mut self, root_folder_uuid: &uuid::Uuid) -> Result<Option<Vec<FileResponse>>, DriveError> {
         let uuid_vec = root_folder_uuid.clone().as_bytes().to_vec();
-        let (parent_id, parent_path) = try!(self.conn.query_row_named("SELECT id, path FROM files WHERE uuid=:uuid", &[(":uuid", &uuid_vec)]
+        let (parent_id, parent_path) = try!(self.conn.query_row_named("SELECT id, path FROM files WHERE uuid=:uuid"
+            , &[(":uuid", &uuid_vec)]
             , |row| -> (String, PathBuf) {
                 ( row.get(0)
-                , Path::new(&row.get::<i32, String>(1)).to_owned()
-                )
-            }));
+                , Path::new(&row.get::<i32, String>(1)).to_owned() )
+            }
+        ));
         println!("getting file list for parent ID: {}", parent_id);
 
+        let lastdate = self.conn.query_row("SELECT * FROM meta
+                                            WHERE last_update = (SELECT MAX(last_update) FROM meta)"
+            , &[], |row| -> Timespec { row.get(0) }
+        ).unwrap_or(Timespec::new(0,0));
+
+        // date from which modified files should be updated
+        // older ones should be locally valid
+        let lastdate = format!("{}", convert_timespec_to_tm(lastdate).rfc3339());
+        let lastdate_encoded = utf8_percent_encode(&lastdate, DRIVE_QUERY_ENCODE_SET{});
+
+        let query = format!("https://www.googleapis.com/drive/v3/files\
+                                ?corpus=domain\
+                                &pageSize=100\
+                                &q=%27{}%27+in+parents\
+                                +and+modifiedTime%3E'{}'\
+                                +and+trashed+%3D+false"
+                                , parent_id
+                                , lastdate_encoded);
+        println!("{}", query);
         let mut resp = {
             println!("{}", parent_id);
-            try!(self.client.get(&format!("https://www.googleapis.com/drive/v3/files\
-                              ?corpus=domain\
-                              &pageSize=100\
-                              &q=%27{}%27+in+parents\
-                              +and+trashed+%3D+false"
-                              , parent_id))
+            try!(self.client.get(&query)
                             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
                             .send())
         };
@@ -288,6 +335,13 @@ impl FileDownloader for DriveFileDownloader {
             });
         }
 
+        try!(self.conn.execute("INSERT INTO meta (last_update, num_files_updated)
+                                VALUES ($1, $2)",
+                             &[ &time::now().to_timespec(),
+                                &(files.len() as i64)
+                              ]
+        ));
+
         Ok(Some(files))
     }
 
@@ -307,6 +361,11 @@ impl FileDownloader for DriveFileDownloader {
         }));
         file_path.push(fr.name.clone());
 
+//        let (path, mimeType) = try!(self.conn.query_row_named("SELECT path, mimetype FROM files WHERE uuid=:uuid"
+//            , &[(":uuid", &uuid.clone().as_bytes().to_vec())]
+//            , |row| -> (Option<PathBuf>, Option<String>)
+//        ));
+
         {
             let fr = self.uuid_map.get_mut(uuid).unwrap();
             fr.path = Some(file_path.clone());
@@ -319,8 +378,8 @@ impl FileDownloader for DriveFileDownloader {
             }
         }
 
-        let (id, maybe_checksum) = try!(self.conn.query_row_named("SELECT id, checksum FROM files WHERE uuid=:uuid",
-            &[(":uuid", &uuid.clone().as_bytes().to_vec())]
+        let (id, maybe_checksum) = try!(self.conn.query_row_named("SELECT id, checksum FROM files WHERE uuid=:uuid"
+            , &[(":uuid", &uuid.clone().as_bytes().to_vec())]
             , |row| -> (String, Option<String>) {
                 (row.get(0), row.get(1))
             }
@@ -334,6 +393,14 @@ impl FileDownloader for DriveFileDownloader {
             println!("updating metadata for {:?}", file_path);
             let dfi = try!(self.download_file(uuid, parent_uuid));
 
+            self.conn.execute("UPDATE files
+                               SET checksum=$1, size=$2
+                               WHERE uuid=$3",
+                            &[ &dfi.checksum,
+                               &(dfi.size as i64),
+                               &uuid.clone().as_bytes().to_vec(),
+                             ]).unwrap();
+
             try!(self.verify_checksum(uuid, &dfi.checksum))
         };
 
@@ -344,7 +411,7 @@ impl FileDownloader for DriveFileDownloader {
 
     fn create_local_file(&mut self, fd: &FileData, file_path: &Path, metadata_path_str: &Path) -> Result<u64, DriveError> {
         let fr = match fd.source_data {
-            SourceData::Drive(ref fr)=> fr,
+            SourceData::Drive(ref fr) => fr,
             _ => panic!("fdafasdf")
         };
 
@@ -535,4 +602,21 @@ pub fn request_new_access_code(c: &Client) -> Result<TokenResponse, DriveError> 
     let mut resp_string = String::new();
     try!(resp.read_to_string(&mut resp_string));
     json::decode(&resp_string).map_err(From::from)
+}
+
+pub fn convert_timespec_to_tm(ts: Timespec) -> Tm {
+    let time_duration = ts - Timespec::new(0,0);
+    Tm {
+        tm_sec:    0,
+        tm_min:    0,
+        tm_hour:   0,
+        tm_mday:   1, // for some reason, the day is off by 1
+        tm_mon:    0,
+        tm_year:   70, // for difference b/w UNIX epoch and 1900
+        tm_wday:   0,
+        tm_yday:   0,
+        tm_isdst:  0,
+        tm_utcoff: 0,
+        tm_nsec:   0,
+    } + time_duration
 }

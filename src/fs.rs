@@ -265,7 +265,7 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
         self.child_map.entry(inode).or_insert(Vec::new());
         self.parent_map.entry(inode).or_insert(_parent);
 
-        reply.created(&Timespec::new(0,0), &fd.attr, fd.attr.ino, 0, 0)
+        reply.created(&ts, &fd.attr, fd.attr.ino, 0, 0)
     }
     fn getlk(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, _start: u64, _end: u64, _typ: u32, _pid: u32, reply: ReplyLock) { unimplemented!() }
     fn setlk(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, _start: u64, _end: u64, _typ: u32, _pid: u32, _sleep: bool, reply: ReplyEmpty) { unimplemented!() }

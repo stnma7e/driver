@@ -61,19 +61,56 @@ impl<'a, 'b> FileTree<'a, 'b> {
                     "regular"
                 };
 
+
+                let mut size = 0;
+                {
+                    let parent = try!(self.inode_map.get(&parent_inode).ok_or(DriveError {
+                        kind: DriveErrorType::NoSuchInode,
+                        response: None,
+                    }));
+
+                    match self.file_downloader.retreive_file(&fr.uuid, &parent.id) {
+                        Ok(s) => {
+                            size = s;
+                        },
+                        Err(error) => {
+                            println!("error when saving or downloading file: {:?}", error);
+                            println!("deleting metadata, and trying a fresh save");
+                            try!(
+                                (match error.response {
+                                    Some(ref resp) => {
+                                        self.file_downloader.resolve_error(resp)
+                                    },
+                                    None => {
+                                        println!("no response in error: {:?}", error.kind);
+                                        Err(error)
+                                    }
+                                })
+                                .and(self.file_downloader.retreive_file(&fr.uuid, &parent.id))
+                                .or_else(|err| -> Result<u64, DriveError> {
+                                    println!("error resolution failed. err2: {:?}", err);
+                                    Ok(0)
+                                })
+                            );
+                        }
+                    }
+                }
+
                 self.conn.execute("INSERT INTO files (ino, uuid, parent_ino, name, size, kind)
                                    VALUES ($1, $2, $3, $4, $5, $6)",
                                    &[ &(inode as i64),
                                       &fr.uuid.clone().as_bytes().to_vec(),
                                       &(parent_inode as i64),
                                       &fr.name.clone(),
-                                      &0,
+                                      &(size as i64),
                                       &kind,
                                     ]
-                ).unwrap_or_else(|_| {
-                    println!("file already in filetree db: {}", fr.name);
+                ).unwrap_or_else(|err| {
+                    println!("file already in filetree db: {}, err: {:?}", fr.name, err);
                     0
                 });
+
+
             }
         }
 
@@ -85,7 +122,7 @@ impl<'a, 'b> FileTree<'a, 'b> {
         try!(self.check_for_new_files(parent_folder_id, parent_inode));
 
         let files = {
-            let mut stmt = try!(self.conn.prepare("SELECT uuid, ino, name, kind FROM files
+            let mut stmt = try!(self.conn.prepare("SELECT uuid, ino, name, kind, size FROM files
                                               WHERE parent_ino=:parent_ino"));
             let rows = try!(stmt.query_map_named(&[(":parent_ino", &(parent_inode as i64))]
                 , |row| -> FileData {
@@ -93,6 +130,7 @@ impl<'a, 'b> FileTree<'a, 'b> {
                     let ino  = row.get::<i32, i64>(1) as u64;
                     let name = row.get::<i32, String>(2);
                     let str_kind = row.get::<i32, String>(3);
+                    let size = row.get::<i32, i64>(4) as u64;
                     let ts = time::now().to_timespec();
 
                     let mut fadsf = FileType::RegularFile;
@@ -109,8 +147,8 @@ impl<'a, 'b> FileTree<'a, 'b> {
                         parent_inode: parent_inode,
                         attr: FileAttr {
                             ino: ino,
-                            size: 0,
-                            blocks: 0,
+                            size: size,
+                            blocks: size/512,
                             atime: ts,
                             mtime: ts,
                             ctime: ts,
@@ -135,42 +173,8 @@ impl<'a, 'b> FileTree<'a, 'b> {
             files.clone()
         };
 
-        for mut fd in files {
+        for fd in files {
             println!("found parent {}, adding new child {:?}, inode: {}", parent_folder_id, fd.path, fd.attr.ino);
-
-            {
-                let parent = try!(self.inode_map.get(&fd.parent_inode).ok_or(DriveError {
-                    kind: DriveErrorType::NoSuchInode,
-                    response: None,
-                }));
-
-                match self.file_downloader.retreive_file(&fd.id, &parent.id) {
-                    Ok(size) => {
-                        fd.attr.size = size;
-                        fd.attr.blocks = size/512;
-                    },
-                    Err(error) => {
-                        println!("error when saving or downloading file: {:?}", error);
-                        println!("deleting metadata, and trying a fresh save");
-                        try!(
-                            (match error.response {
-                                Some(ref resp) => {
-                                    self.file_downloader.resolve_error(resp)
-                                },
-                                None => {
-                                    println!("no response in error: {:?}", error.kind);
-                                    Err(error)
-                                }
-                            })
-                            .and(self.file_downloader.retreive_file(&fd.id, &parent.id))
-                            .or_else(|err| -> Result<u64, DriveError> {
-                                println!("error resolution failed. err2: {:?}", err);
-                                Ok(0)
-                            })
-                        );
-                    }
-                }
-            }
 
             self.inode_map.entry(fd.attr.ino).or_insert(fd.clone());
             self.child_map.entry(fd.attr.ino).or_insert(Vec::new());
@@ -200,49 +204,3 @@ pub fn get_file_checksum(file_path: &Path) -> Result<String, DriveError> {
 
     Ok(md5.result_str())
 }
-
-/*
-        for fr in files {
-            let inode = self.current_inode;
-            self.current_inode += 1;
-
-            let mut new_path = root_folder_path.to_owned();
-            new_path.push(fr.name.clone());
-            println!("found parent {}, adding new child {:?}", root_folder_id, new_path);
-
-            let ts = time::now().to_timespec();
-            let mut fd = FileData {
-                id: fr.uuid,
-//                path: new_path.to_owned(),
-                path: Path::new("").to_owned(),
-                parent_inode: parent_inode,
-                attr: FileAttr {
-                    ino: inode,
-                    size: 0,
-                    blocks: 0,
-                    atime: ts,
-                    mtime: ts,
-                    ctime: ts,
-                    crtime: ts,
-                    kind: fr.kind.clone(),
-                    perm: 0o777,
-                    nlink: 0,
-                    uid: 1000,
-                    gid: 1000,
-                    rdev: 0,
-                    flags: 0,
-                },
-                source_data: fr.source_data,
-            };
-
-                self.conn.execute("INSERT INTO drive (ino, uuid, parent_ino, name, size)
-                                   VALUES ($1, $2, $3, $4, $5)",
-                                   &[ &(fd.attr.ino as i64),
-                                      &fd.id.clone().as_bytes().to_vec(),
-                                      &(fd.parent_inode as i64),
-                                      &fd.path.file_name().unwrap().to_string_lossy().to_string(),
-                                      &(fd.attr.size as i64)
-                                    ]
-                                 ).unwrap_or(0);
-
-*/
