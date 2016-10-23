@@ -15,8 +15,13 @@ use fuse::FileAttr;
 
 use types::*;
 
+pub struct FileUpdates {
+    pub new_files: Option<Vec<FileResponse>>,
+    pub deleted_files: Option<Vec<FileResponse>>
+}
+
 pub trait FileDownloader {
-    fn get_file_list(&mut self, root_folder: &uuid::Uuid) -> Result<Option<Vec<FileResponse>>, DriveError>;
+    fn get_file_list(&mut self, root_folder: &uuid::Uuid) -> Result<FileUpdates, DriveError>;
     fn resolve_error(&mut self, resp_string: &str) -> Result<(), DriveError>;
     fn verify_checksum(&self, fd: &Uuid, checksum: &String) -> Result<FileCheckResponse, DriveError>;
     fn retreive_file(&mut self, uuid: &Uuid, parent_uuid: &Uuid) -> Result<u64, DriveError>;
@@ -38,19 +43,20 @@ pub struct FileTree<'a, 'b> {
 impl<'a, 'b> FileTree<'a, 'b> {
     fn check_for_new_files(&mut self, parent_folder_id: &uuid::Uuid, parent_inode: u64) -> Result<(), DriveError> {
         println!("\n\n\n");
-        let ffiles = try!(
-            self.file_downloader.get_file_list(parent_folder_id).or_else(|err| {
+        let updates = try!(
+            self.file_downloader.get_file_list(parent_folder_id)
+            .or_else(|err| {
                 println!("trying to resolve a getfilelist error");
                 self.file_downloader.resolve_error(&err.response.expect(&format!("no response in errorrr: {:?}", err.kind)))
                 .and(self.file_downloader.get_file_list(parent_folder_id))
-                .or_else(|err| -> Result<Option<Vec<FileResponse>>, DriveError> {
+                .or_else(|err| -> Result<FileUpdates, DriveError> {
                     println!("err: {:?}", err);
                     Err(err)
                 })
             })
         );
 
-        if let Some(new_files) = ffiles {
+        if let Some(new_files) = updates.new_files {
             for fr in new_files {
                 let inode = self.current_inode;
                 self.current_inode += 1;
@@ -106,11 +112,34 @@ impl<'a, 'b> FileTree<'a, 'b> {
                                       &kind,
                                     ]
                 ).unwrap_or_else(|err| {
-                    println!("file already in filetree db: {}, err: {:?}", fr.name, err);
+//                    println!("file already in filetree db: {}, err: {:?}", fr.name, err);
+//                    println!("updating file information");
+
+                    self.conn.execute("UPDATE files
+                                       SET name=$1
+                                       WHERE uuid=$3"
+                        , &[ &fr.name.clone()
+                           , &fr.uuid.clone().as_bytes().to_vec()
+                           ]
+                    ).unwrap_or_else(|err| {
+                        println!("couldn't update file in filetree db, err: {:?}", err);
+                        0
+                    });
                     0
                 });
 
 
+            }
+        }
+
+        if let Some(del_files) = updates.deleted_files {
+            for fr in del_files {
+                self.conn.execute("DELETE FROM files WHERE uuid=:uuid"
+                    , &[ &fr.uuid.clone().as_bytes().to_vec() ]
+                ).unwrap_or_else(|err| {
+                    println!("couldn't delte file: {}, err: {:?}", fr.name, err);
+                    0
+                });
             }
         }
 
@@ -119,11 +148,11 @@ impl<'a, 'b> FileTree<'a, 'b> {
     }
 
     pub fn get_files(&mut self, parent_folder_path: &Path, parent_folder_id: &uuid::Uuid, parent_inode: u64) -> Result<(), DriveError> {
-        try!(self.check_for_new_files(parent_folder_id, parent_inode));
+        //try!(self.check_for_new_files(parent_folder_id, parent_inode));
 
         let files = {
             let mut stmt = try!(self.conn.prepare("SELECT uuid, ino, name, kind, size FROM files
-                                              WHERE parent_ino=:parent_ino"));
+                                                   WHERE parent_ino=:parent_ino"));
             let rows = try!(stmt.query_map_named(&[(":parent_ino", &(parent_inode as i64))]
                 , |row| -> FileData {
                     let uuid = Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).unwrap();

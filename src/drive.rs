@@ -133,8 +133,9 @@ impl DriveFileDownloader {
 
         // we'll checksum the file (if we have it) on the system, and compare it to the
         // server, if all is OK, create a new metadata file
-        let (maybe_checksum, maybe_path) = try!(self.conn.query_row_named("SELECT checksum, path FROM files WHERE uuid=:uuid",
-            &[(":uuid", &uuid.clone().as_bytes().to_vec())]
+        let (maybe_checksum, maybe_path) = try!(self.conn.query_row_named("SELECT checksum, path FROM files
+                                                                           WHERE uuid=:uuid"
+            , &[(":uuid", &uuid.clone().as_bytes().to_vec())]
             , |row| -> (Option<String>, Option<PathBuf>) {
                 ( row.get(0)
                 , if let Some(path) = row.get::<i32, Option<String>>(1) {
@@ -223,7 +224,7 @@ define_encode_set! {
 }
 
 impl FileDownloader for DriveFileDownloader {
-    fn get_file_list(&mut self, root_folder_uuid: &uuid::Uuid) -> Result<Option<Vec<FileResponse>>, DriveError> {
+    fn get_file_list(&mut self, root_folder_uuid: &uuid::Uuid) -> Result<FileUpdates, DriveError> {
         let uuid_vec = root_folder_uuid.clone().as_bytes().to_vec();
         let (parent_id, parent_path) = try!(self.conn.query_row_named("SELECT id, path FROM files WHERE uuid=:uuid"
             , &[(":uuid", &uuid_vec)]
@@ -234,115 +235,157 @@ impl FileDownloader for DriveFileDownloader {
         ));
         println!("getting file list for parent ID: {}", parent_id);
 
-        let lastdate = self.conn.query_row("SELECT * FROM meta
-                                            WHERE last_update = (SELECT MAX(last_update) FROM meta)"
-            , &[], |row| -> Timespec { row.get(0) }
+        let lastdate = self.conn.query_row_named("SELECT MAX(last_update) FROM meta
+                                                  WHERE uuid = :uuid"
+            , &[(":uuid", &uuid_vec)]
+            , |row| -> Timespec { row.get(0) }
         ).unwrap_or(Timespec::new(0,0));
 
         // date from which modified files should be updated
         // older ones should be locally valid
-        let lastdate = format!("{}", convert_timespec_to_tm(lastdate).rfc3339());
+        let lastdate = format!("{}", convert_timespec_to_tm(Timespec::new(0,0)).rfc3339());
         let lastdate_encoded = utf8_percent_encode(&lastdate, DRIVE_QUERY_ENCODE_SET{});
 
         let query = format!("https://www.googleapis.com/drive/v3/files\
                                 ?corpus=domain\
-                                &pageSize=100\
+                                &pageSize=1000\
                                 &q=%27{}%27+in+parents\
                                 +and+modifiedTime%3E'{}'\
-                                +and+trashed+%3D+false"
+                                +and+trashed+%3D+"
                                 , parent_id
                                 , lastdate_encoded);
         println!("{}", query);
-        let mut resp = {
+        let mut new_resp = {
             println!("{}", parent_id);
-            try!(self.client.get(&query)
+            try!(self.client.get(&(query.clone()+"false"))
                             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
                             .send())
         };
-        // convert the response to a string, then to a JSON object
-        let mut resp_string = String::new();
-        try!(resp.read_to_string(&mut resp_string));
-        let fr_obj = try!((Json::from_str(&resp_string)).map_err(From::from)
-            .and_then(|fr_data: Json| -> Result<json::Object, DriveError> {
-                fr_data.into_object()
-                .ok_or(DriveError {
-                    kind: DriveErrorType::JsonObjectify,
-                    response: Some(resp_string.clone())
+        let mut del_resp = {
+            println!("{}", parent_id);
+            try!(self.client.get(&(query+"true"))
+                            .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
+                            .send())
+        };
+
+        let mut resps = vec!(new_resp, del_resp);
+        let mut files = vec!(Vec::new(), Vec::new());
+        for (resp, files_list) in resps.iter_mut().zip(files.iter_mut()) {
+
+            // convert the response to a string, then to a JSON object
+            let mut resp_string = String::new();
+            try!(resp.read_to_string(&mut resp_string));
+            let fr_obj = try!((Json::from_str(&resp_string)).map_err(From::from)
+                .and_then(|fr_data: Json| -> Result<json::Object, DriveError> {
+                    fr_data.into_object()
+                    .ok_or(DriveError {
+                        kind: DriveErrorType::JsonObjectify,
+                        response: Some(resp_string.clone())
+                    })
+                }).or_else(|err| {
+                    println!("there's probably something wrong with the get_file_list response, err: {:?}", err);
+                    Err(err)
                 })
-            }).or_else(|err| {
-                println!("there's probably something wrong with the get_file_list response, err: {:?}", err);
-                Err(err)
-            })
-        );
+            );
 
-        //println!("{}", resp_string);
+            //println!("{}", resp_string);
 
-        let files = try!(fr_obj.get("files")
-                               .ok_or(DriveError {
-                                    kind: DriveErrorType::JsonInvalidAttribute,
-                                    response: Some(resp_string.clone())
-                                }));
-        let files_array = try!(files.as_array()
-                                    .ok_or(DriveError {
-                                        kind: DriveErrorType::JsonCannotConvertToArray,
+            let files = try!(fr_obj.get("files")
+                                   .ok_or(DriveError {
+                                        kind: DriveErrorType::JsonInvalidAttribute,
                                         response: Some(resp_string.clone())
                                     }));
+            let files_array = try!(files.as_array()
+                                        .ok_or(DriveError {
+                                            kind: DriveErrorType::JsonCannotConvertToArray,
+                                            response: Some(resp_string.clone())
+                                        }));
 
-        let mut files = Vec::new();
-        for i in files_array.into_iter() {
-            // we'll try to decode each file's metadata JSON object in memory to a DriveFileResponse struct
-            let mut decoder = Decoder::new(i.clone());
-            let fr: DriveFileResponse = try!(Decodable::decode(&mut decoder));
+            for i in files_array.into_iter() {
+                // we'll try to decode each file's metadata JSON object in memory to a DriveFileResponse struct
+                let mut decoder = Decoder::new(i.clone());
+                let fr: DriveFileResponse = try!(Decodable::decode(&mut decoder));
 
-            let kind = if fr.mimeType == "application/vnd.google-apps.folder" {
-                FileType::Directory
-            } else {
-                FileType::RegularFile
-            };
+                let kind = if fr.mimeType == "application/vnd.google-apps.folder" {
+                    FileType::Directory
+                } else {
+                    FileType::RegularFile
+                };
 
-            let mut path = parent_path.clone();
-            path.push(fr.name.clone());
+                let mut path = parent_path.clone();
+                path.push(fr.name.clone());
 
 
-            let uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE id=:id", &[(":id", &fr.id)]
-                , |row| -> Uuid {
-                    Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).expect("failed to parse Uuid from drive db storage")
+                let uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE id=:id", &[(":id", &fr.id)]
+                    , |row| -> Uuid {
+                        Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).expect("failed to parse Uuid from drive db storage")
+                    }
+                ).and_then(|uuid| -> Result<Uuid, rusqlite::Error> {
+                    self.conn.execute("UPDATE files
+                                       SET path=$1, mimetype=$2
+                                       WHERE uuid=$3"
+                        , &[ &(path.to_str().expect("nilfalsdfs"))
+                           , &fr.mimeType
+                           , &uuid.clone().as_bytes().to_vec()
+                           ]
+                    ).unwrap_or_else(|err| {
+                        println!("couldn't update file in drive db, err: {:?}", err);
+                        0
+                    });
+
+                    Ok(uuid)
+                }).unwrap_or_else(|_| {
+                    let uuid = Uuid::new_v4();
+                    self.conn.execute("INSERT INTO files (uuid, id, mimetype, path)
+                                       VALUES ($1, $2, $3, $4)"
+                        , &[ &uuid.clone().as_bytes().to_vec()
+                           , &fr.id
+                           , &fr.mimeType
+                           , &(path.to_str().expect("fadsfnjfsad"))
+                           ]
+                    ).unwrap_or_else(|_| {
+                        println!("file already in drive db: {}", fr.name);
+                        0
+                    });
+
+                    uuid
+                });
+
+                {
+                    self.uuid_map.insert(uuid, fr.clone());
                 }
-            ).unwrap_or(Uuid::new_v4());
 
-            {
-                self.uuid_map.insert(uuid, fr.clone());
+    //            println!("drive adding path: {:?} {:?}", uuid.clone().as_bytes().to_vec(), path);
+                files_list.push(FileResponse {
+                    uuid: uuid,
+                    kind: kind,
+                    name: fr.name.clone(),
+                    source_data: SourceData::Drive(fr)
+                });
             }
 
-//            println!("drive adding path: {:?} {:?}", uuid.clone().as_bytes().to_vec(), path);
-            self.conn.execute("INSERT INTO files (uuid, id, mimetype, path)
-                               VALUES ($1, $2, $3, $4)",
-                               &[ &uuid.clone().as_bytes().to_vec(),
-                                  &fr.id,
-                                  &fr.mimeType,
-                                  &(path.to_str().expect("fadsfnjfsad"))
-                                ]
-            ).unwrap_or_else(|_| {
-                println!("file already in drive db: {}", fr.name);
-                0
-            });
+            try!(self.conn.execute("INSERT INTO meta (uuid, last_update, num_files_updated)
+                                    VALUES ($1, $2, $3)",
+                                 &[ &uuid_vec,
+                                    &time::now().to_timespec(),
+                                    &(files_list.len() as i64)
+                                  ]
+            ));
+        }
 
-            files.push(FileResponse {
-                uuid: uuid,
-                kind: kind,
-                name: fr.name.clone(),
-                source_data: SourceData::Drive(fr)
+        for ref fr in &files[1] {
+            self.conn.execute("DELETE FROM files WHERE uuid=:uuid"
+                , &[ &fr.uuid.clone().as_bytes().to_vec() ]
+            ).unwrap_or_else(|err| {
+                println!("couldn't delte file: {}, err: {:?}", fr.name, err);
+                0
             });
         }
 
-        try!(self.conn.execute("INSERT INTO meta (last_update, num_files_updated)
-                                VALUES ($1, $2)",
-                             &[ &time::now().to_timespec(),
-                                &(files.len() as i64)
-                              ]
-        ));
-
-        Ok(Some(files))
+        Ok(FileUpdates{
+            new_files: Some(files[0].clone()),
+            deleted_files: Some(files[1].clone())
+        })
     }
 
     fn retreive_file(&mut self, uuid: &Uuid, parent_uuid: &Uuid) -> Result<u64, DriveError> {

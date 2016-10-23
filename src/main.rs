@@ -21,11 +21,11 @@ use driver::drive::*;
 
 fn main() {
 //    let root_folder = (vec![], "0B7TtU3YsiIjTTS1oUE5wZFpsYVk");
-    let root_folder_name = "file";
+    let root_folder_name = ".drive_files";
     let root_folder_path = Path::new(root_folder_name);
 //    let root_folder_id =  "0B7TtU3YsiIjTWjBOM0YwYkVBa1U";
-    let root_folder_id =  "0B7TtU3YsiIjTaEd3WlVSMGRERlk";
-//    let root_folder_id =  "root";
+//    let root_folder_id =  "0B7TtU3YsiIjTaEd3WlVSMGRERlk";
+    let root_folder_id =  "root";
     let root_folder_inode = 1;
 //    let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTeHJGR1VKMHB3cWs");
 
@@ -100,8 +100,8 @@ fn main() {
     ft.get_files(Path::new(""), &root_folder_uuid, root_folder_inode)
         .expect("this shit fucked up");
 
-    println!("{:?}\n", ft.inode_map);
-    println!("{:?}", ft.child_map);
+//    println!("{:?}\n", ft.inode_map);
+//    println!("{:?}", ft.child_map);
 
     fuse::mount(ft, &"root.2", &[]);
 }
