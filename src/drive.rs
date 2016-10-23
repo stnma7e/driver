@@ -81,9 +81,10 @@ impl DriveFileDownloader {
         let mut uuid_map = HashMap::new();
         uuid_map.insert(root_uuid, DriveFileResponse {
             kind: "drive#file".to_string(),
-            id: root_id,
+            id: root_id.clone(),
             name: "".to_string(),
             mimeType: "application/vnd.google-apps.folder".to_string(),
+            parents: vec!(root_id),
             path: Some(file_path),
         });
 
@@ -157,7 +158,7 @@ impl DriveFileDownloader {
             let mut resp_string = Vec::<u8>::new();
             try!(resp.read_to_end(&mut resp_string));
             println!("len: {}", resp_string.len());
-            try!(f.write_all(&resp_string.clone()));
+            try!(f.write_all(&resp_string.clone())) ;
 
             let md5_result = {
                 let mut md5 = Md5::new();
@@ -194,6 +195,8 @@ impl DriveFileDownloader {
                     path: file_path.clone(),
                     checksum: checksum,
                 })
+            }).or_else(|_| {
+                fn_download_file(file_path.clone())
             })
         } else if let Some(path) = maybe_path {
             // if we have a path for the file, we can chcek to see if any local data is
@@ -243,12 +246,13 @@ impl FileDownloader for DriveFileDownloader {
 
         // date from which modified files should be updated
         // older ones should be locally valid
-        let lastdate = format!("{}", convert_timespec_to_tm(Timespec::new(0,0)).rfc3339());
+        let lastdate = format!("{}", convert_timespec_to_tm(lastdate).rfc3339());
         let lastdate_encoded = utf8_percent_encode(&lastdate, DRIVE_QUERY_ENCODE_SET{});
 
         let query = format!("https://www.googleapis.com/drive/v3/files\
                                 ?corpus=domain\
                                 &pageSize=1000\
+                                &fields=files\
                                 &q=%27{}%27+in+parents\
                                 +and+modifiedTime%3E'{}'\
                                 +and+trashed+%3D+"
@@ -275,6 +279,7 @@ impl FileDownloader for DriveFileDownloader {
             // convert the response to a string, then to a JSON object
             let mut resp_string = String::new();
             try!(resp.read_to_string(&mut resp_string));
+            println!("{}", resp_string);
             let fr_obj = try!((Json::from_str(&resp_string)).map_err(From::from)
                 .and_then(|fr_data: Json| -> Result<json::Object, DriveError> {
                     fr_data.into_object()
@@ -316,7 +321,8 @@ impl FileDownloader for DriveFileDownloader {
                 path.push(fr.name.clone());
 
 
-                let uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE id=:id", &[(":id", &fr.id)]
+                let uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE id=:id"
+                    , &[(":id", &fr.id)]
                     , |row| -> Uuid {
                         Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).expect("failed to parse Uuid from drive db storage")
                     }
@@ -355,9 +361,18 @@ impl FileDownloader for DriveFileDownloader {
                     self.uuid_map.insert(uuid, fr.clone());
                 }
 
+                assert!(fr.parents.len() == 1);
+                let parent_uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE id=:id"
+                    , &[( ":id", &fr.parents[0] )]
+                    , |row| -> Uuid {
+                        Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).expect("failed to parse parent Uuid from drive db storage")
+                    }
+                ).unwrap();
+
     //            println!("drive adding path: {:?} {:?}", uuid.clone().as_bytes().to_vec(), path);
                 files_list.push(FileResponse {
                     uuid: uuid,
+                    parent_uuid: parent_uuid,
                     kind: kind,
                     name: fr.name.clone(),
                     source_data: SourceData::Drive(fr)
@@ -430,7 +445,22 @@ impl FileDownloader for DriveFileDownloader {
         println!("{:?}, {:?}", id, maybe_checksum);
 
         let info = if let Some(checksum) = maybe_checksum {
-            try!(self.verify_checksum(uuid, &checksum))
+            try!(self.verify_checksum(uuid, &checksum)
+            .or_else(|_| -> Result<FileCheckResponse, DriveError> {
+                // if the checksum fails, we need to redownload it
+                println!("updating metadata for {:?}", file_path);
+                let dfi = try!(self.download_file(uuid, parent_uuid));
+
+                self.conn.execute("UPDATE files
+                                   SET checksum=$1, size=$2
+                                   WHERE uuid=$3",
+                                &[ &dfi.checksum,
+                                   &(dfi.size as i64),
+                                   &uuid.clone().as_bytes().to_vec(),
+                                 ]).unwrap();
+
+                self.verify_checksum(uuid, &dfi.checksum)
+            }))
         } else {
             // if the checksum fails, we need to redownload it
             println!("updating metadata for {:?}", file_path);

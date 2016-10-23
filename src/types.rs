@@ -40,6 +40,7 @@ pub struct DriveFileResponse {
     pub id: String,
     pub name: String,
     pub mimeType: String,
+    pub parents: Vec<String>,
     pub path: Option<PathBuf>,
 }
 
@@ -52,6 +53,7 @@ pub enum SourceData {
 #[derive (Debug, Clone)]
 pub struct FileResponse {
     pub uuid: uuid::Uuid,
+    pub parent_uuid: uuid::Uuid,
     pub kind: FileType,
     pub name: String,
     pub source_data: SourceData,

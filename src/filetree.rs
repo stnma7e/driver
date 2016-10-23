@@ -70,7 +70,13 @@ impl<'a, 'b> FileTree<'a, 'b> {
 
                 let mut size = 0;
                 {
-                    let parent = try!(self.inode_map.get(&parent_inode).ok_or(DriveError {
+                    let parent_ino = self.conn.query_row_named("SELECT ino FROM files WHERE uuid=:uuid"
+                        , &[( ":uuid", &fr.parent_uuid.clone().as_bytes().to_vec() )]
+                        , |row| -> u64 {
+                            row.get::<i32, i64>(0) as u64
+                        }
+                    ).unwrap();
+                    let parent = try!(self.inode_map.get(&parent_ino).ok_or(DriveError {
                         kind: DriveErrorType::NoSuchInode,
                         response: None,
                     }));
@@ -148,8 +154,15 @@ impl<'a, 'b> FileTree<'a, 'b> {
     }
 
     pub fn get_files(&mut self, parent_folder_path: &Path, parent_folder_id: &uuid::Uuid, parent_inode: u64) -> Result<(), DriveError> {
-        //try!(self.check_for_new_files(parent_folder_id, parent_inode));
+        try!(self.check_for_new_files(parent_folder_id, parent_inode));
+        println!("Populating FUSE fs...
 
+
+        ");
+        self._get_files(parent_folder_path, parent_folder_id, parent_inode)
+    }
+
+    fn _get_files(&mut self, parent_folder_path: &Path, parent_folder_id: &uuid::Uuid, parent_inode: u64) -> Result<(), DriveError> {
         let files = {
             let mut stmt = try!(self.conn.prepare("SELECT uuid, ino, name, kind, size FROM files
                                                    WHERE parent_ino=:parent_ino"));
@@ -203,7 +216,7 @@ impl<'a, 'b> FileTree<'a, 'b> {
         };
 
         for fd in files {
-            println!("found parent {}, adding new child {:?}, inode: {}", parent_folder_id, fd.path, fd.attr.ino);
+            //println!("found parent {}, adding new child {:?}, inode: {}", parent_folder_id, fd.path, fd.attr.ino);
 
             self.inode_map.entry(fd.attr.ino).or_insert(fd.clone());
             self.child_map.entry(fd.attr.ino).or_insert(Vec::new());
@@ -214,7 +227,7 @@ impl<'a, 'b> FileTree<'a, 'b> {
             // then recurse to retrieve children files
             if fd.attr.kind == FileType::Directory
             && fd.attr.ino  != 1 {
-                try!(self.get_files(&fd.path, &fd.id, fd.attr.ino));
+                try!(self._get_files(&fd.path, &fd.id, fd.attr.ino));
             }
         }
 
