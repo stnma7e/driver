@@ -27,6 +27,8 @@ pub trait FileDownloader {
     fn retreive_file(&mut self, uuid: &Uuid, parent_uuid: &Uuid) -> Result<u64, DriveError>;
     fn create_local_file(&mut self, fd: &FileData, file_path: &Path, metadata_path_str: &Path) -> Result<u64, DriveError>;
     fn read_file(&self, uuid: &Uuid) -> Result<Vec<u8>, DriveError>;
+    fn write_file(&self, uuid: &Uuid, data: &[u8], offset: u64) -> Result<u32, DriveError>;
+    fn flush_file(&self, uuid: &Uuid) -> Result<(), DriveError>;
 }
 
 pub struct FileTree<'a, 'b> {
@@ -66,7 +68,6 @@ impl<'a, 'b> FileTree<'a, 'b> {
                 } else {
                     "regular"
                 };
-
 
                 let mut size = 0;
                 {
@@ -117,7 +118,7 @@ impl<'a, 'b> FileTree<'a, 'b> {
                                       &(size as i64),
                                       &kind,
                                     ]
-                ).unwrap_or_else(|err| {
+                ).unwrap_or_else(|_| {
 //                    println!("file already in filetree db: {}, err: {:?}", fr.name, err);
 //                    println!("updating file information");
 

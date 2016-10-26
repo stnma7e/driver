@@ -1,3 +1,5 @@
+#![allow(unused_variables)]
+
 extern crate uuid;
 
 use std::path::Path;
@@ -141,10 +143,35 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
     fn symlink(&mut self, _req: &Request, _parent: u64, _name: &Path, _link: &Path, reply: ReplyEntry) { unimplemented!() }
     fn rename(&mut self, _req: &Request, _parent: u64, _name: &Path, _newparent: u64, _newname: &Path, reply: ReplyEmpty) { unimplemented!() }
     fn link(&mut self, _req: &Request, _ino: u64, _newparent: u64, _newname: &Path, reply: ReplyEntry) { unimplemented!() }
-    fn write(&mut self, _req: &Request, _ino: u64, _fh: u64, _offset: u64, _data: &[u8], _flags: u32, reply: ReplyWrite) { unimplemented!() }
+    fn write(&mut self, _req: &Request, _ino: u64, _fh: u64, _offset: u64, _data: &[u8], _flags: u32, reply: ReplyWrite) {
+        println!("write(ino={}, fh={}, offset={}, len={})", _ino, _fh, _offset, _data.len());
+
+        let uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE ino=:ino"
+            , &[( ":ino", &(_ino as i64) )]
+            , |row| -> Uuid {
+                Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).unwrap()
+            }
+        ).unwrap();
+
+        reply.written(self.file_downloader.write_file(&uuid, _data, _offset).unwrap())
+    }
     fn flush(&mut self, _req: &Request, _ino: u64, _fh: u64, _lock_owner: u64, reply: ReplyEmpty) {
         println!("flush(ino={}, fh={})", _ino, _fh);
-        reply.ok();
+
+        let uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE ino=:ino"
+            , &[( ":ino", &(_ino as i64) )]
+            , |row| -> Uuid {
+                Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).unwrap()
+            }
+        ).unwrap();
+
+        match self.file_downloader.flush_file(&uuid) {
+            Ok(_) => reply.ok(),
+            Err(err) => {
+                println!("error while flushing {}, {:?}", _ino, err);
+                reply.error(-1);
+            }
+        }
     }
     fn release(&mut self, _req: &Request, _ino: u64, _fh: u64, _flags: u32, _lock_owner: u64, _flush: bool, reply: ReplyEmpty) {
         println!("release(ino={}, fh={}, flush={:?})", _ino, _fh, _flush);

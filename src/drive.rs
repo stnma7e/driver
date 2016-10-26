@@ -6,14 +6,18 @@ use url::percent_encoding::{utf8_percent_encode, QUERY_ENCODE_SET};
 use time;
 use time::{Timespec, Tm};
 
+use std::str;
+
 use hyper::{Client};
 use hyper::header::{ContentType, Authorization, Bearer};
+use hyper::client::{Body};
 use mime::{Mime, TopLevel, SubLevel};
 
 use std::collections::hash_map::HashMap;
 use rustc_serialize::json::{Json, ToJson, Decoder, as_pretty_json};
 use rustc_serialize::{json, Decodable};
 use std::io;
+use std::io::SeekFrom;
 use std::io::prelude::*;
 use std::fs::{File, DirBuilder,OpenOptions};
 
@@ -233,7 +237,8 @@ impl FileDownloader for DriveFileDownloader {
             , &[(":uuid", &uuid_vec)]
             , |row| -> (String, PathBuf) {
                 ( row.get(0)
-                , Path::new(&row.get::<i32, String>(1)).to_owned() )
+                , Path::new(&row.get::<i32, String>(1)).to_owned()
+                )
             }
         ));
         println!("getting file list for parent ID: {}", parent_id);
@@ -243,6 +248,7 @@ impl FileDownloader for DriveFileDownloader {
             , &[(":uuid", &uuid_vec)]
             , |row| -> Timespec { row.get(0) }
         ).unwrap_or(Timespec::new(0,0));
+        println!("{:?}", convert_timespec_to_tm(lastdate));
 
         // date from which modified files should be updated
         // older ones should be locally valid
@@ -259,13 +265,13 @@ impl FileDownloader for DriveFileDownloader {
                                 , parent_id
                                 , lastdate_encoded);
         println!("{}", query);
-        let mut new_resp = {
+        let new_resp = {
             println!("{}", parent_id);
             try!(self.client.get(&(query.clone()+"false"))
                             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
                             .send())
         };
-        let mut del_resp = {
+        let del_resp = {
             println!("{}", parent_id);
             try!(self.client.get(&(query+"true"))
                             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
@@ -516,6 +522,54 @@ impl FileDownloader for DriveFileDownloader {
         Ok(data)
     }
 
+    fn write_file(&self, uuid: &Uuid, data: &[u8], offset: u64) -> Result<u32, DriveError> {
+        let path = self.conn.query_row_named("SELECT path FROM files WHERE uuid=:uuid"
+            , &[( ":uuid", &uuid.clone().as_bytes().to_vec() )]
+            , |row| -> String {
+                row.get(0)
+            }
+        ).unwrap();
+
+        let mut fh = OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .create(false)
+            .open(path)
+            .unwrap();
+        try!(fh.seek(SeekFrom::Start(offset)));
+        try!(fh.write_all(data));
+        try!(fh.set_len(offset+(data.len() as u64)));
+
+        Ok(data.len() as u32)
+    }
+
+    fn flush_file(&self, uuid: &Uuid) -> Result<(), DriveError> {
+        let (fid, path) = self.conn.query_row_named("SELECT id, path FROM files WHERE uuid=:uuid"
+            , &[( ":uuid", &uuid.clone().as_bytes().to_vec() )]
+            , |row| -> (String, String) {
+                (row.get(0),
+                 row.get(1)
+                )
+            }
+        ).unwrap();
+
+        let mut fh = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path)
+            .unwrap();
+        let mut data = Vec::<u8>::new();
+        try!(fh.read_to_end(&mut data));
+
+        let resp = try!(self.client
+            .patch(&format!("https://www.googleapis.com/upload/drive/v3/files/{}", fid))
+            .body(&data as &[u8])
+            .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
+            .send());
+
+        Ok(())
+    }
+
     fn verify_checksum(&self, uuid: &Uuid, checksum: &String) -> Result<FileCheckResponse, DriveError> {
         let fr = try!(self.uuid_map.get(uuid).ok_or(DriveError {
             kind: DriveErrorType::FailedUuidLookup,
@@ -645,7 +699,6 @@ impl FileDownloader for DriveFileDownloader {
         // for loop returns (), so a value for the function is needed
         Ok(())
     }
-
 }
 
 pub fn request_new_access_code(c: &Client) -> Result<TokenResponse, DriveError> {
@@ -683,8 +736,8 @@ pub fn convert_timespec_to_tm(ts: Timespec) -> Tm {
         tm_sec:    0,
         tm_min:    0,
         tm_hour:   0,
-        tm_mday:   1, // for some reason, the day is off by 1
-        tm_mon:    0,
+        tm_mday:   1, // days of the month start at 1, not 0
+        tm_mon:    1,
         tm_year:   70, // for difference b/w UNIX epoch and 1900
         tm_wday:   0,
         tm_yday:   0,
