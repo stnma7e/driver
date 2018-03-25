@@ -2,6 +2,8 @@ extern crate uuid;
 extern crate std;
 extern crate rusqlite;
 
+use std::borrow::Cow;
+
 use url::percent_encoding::{utf8_percent_encode, QUERY_ENCODE_SET};
 use time;
 use time::{Timespec, Tm};
@@ -72,11 +74,12 @@ impl DriveFileDownloader {
         };
 
         db_conn.execute("INSERT INTO files (id, uuid, path)
-                           VALUES ($1, $2, $3)",
-                           &[&root_id,
-                           &root_uuid.clone().as_bytes().to_vec(),
-                           &file_path.to_str().unwrap()]).unwrap_or_else(
-            |err| {
+                         VALUES ($1, $2, $3)"
+            , &[ &root_id,
+                 &root_uuid.clone().as_bytes().to_vec(),
+                 &file_path.to_str().unwrap()
+               ]
+        ).unwrap_or_else(| err| {
                 println!("root probably already in drive db, err: {:?}", err);
                 0
             }
@@ -159,32 +162,21 @@ impl DriveFileDownloader {
                                  .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
                                  .send());
 
-            let mut resp_string = Vec::<u8>::new();
-            try!(resp.read_to_end(&mut resp_string));
-            println!("len: {}", resp_string.len());
-            try!(f.write_all(&resp_string.clone())) ;
-
-            let md5_result = {
-                let mut md5 = Md5::new();
-                md5.input(&resp_string);
-                md5.result_str()
-            };
-
-            let check_response = try!(self.verify_checksum(uuid, &md5_result));
+            let check_response = try!(self.verify_checksum(uuid, None));
             let size = check_response.size;
 
-            println!("md5: {}, size: {}", md5_result, size);
+            println!("md5: {}, size: {}", check_response.md5Checksum, size);
             self.conn.execute("UPDATE files
                                SET checksum=$1, size=$2
                                WHERE uuid=$3",
-                            &[ &md5_result,
+                            &[ &check_response.md5Checksum,
                                &(check_response.size as i64),
                                &uuid.clone().as_bytes().to_vec(),
                              ]).unwrap();
 
             Ok(DownloadedFileInformation {
                 size: size,
-                checksum: md5_result,
+                checksum: check_response.md5Checksum,
                 path: file_path,
             })
         };
@@ -192,7 +184,7 @@ impl DriveFileDownloader {
         if let Some(checksum) = maybe_checksum {
             // if the checksum matches that from Drive, then file is downloaded
             // correctly, and all we need to do is cache the checksum
-            self.verify_checksum(uuid, &checksum)
+            self.verify_checksum(uuid, Some(&checksum))
             .and_then(|check_response| {
                 Ok(DownloadedFileInformation {
                     size: check_response.size,
@@ -207,7 +199,7 @@ impl DriveFileDownloader {
             // already valid
             get_file_checksum(&path).and_then(|ck| {
                 // check with Drive for a the valid checksum
-                self.verify_checksum(uuid, &ck)
+                self.verify_checksum(uuid, Some(&ck))
                 .and_then(|check_response| {
                     Ok(DownloadedFileInformation {
                         size: check_response.size,
@@ -451,7 +443,7 @@ impl FileDownloader for DriveFileDownloader {
         println!("{:?}, {:?}", id, maybe_checksum);
 
         let info = if let Some(checksum) = maybe_checksum {
-            try!(self.verify_checksum(uuid, &checksum)
+            try!(self.verify_checksum(uuid, Some(&checksum))
             .or_else(|_| -> Result<FileCheckResponse, DriveError> {
                 // if the checksum fails, we need to redownload it
                 println!("updating metadata for {:?}", file_path);
@@ -465,7 +457,7 @@ impl FileDownloader for DriveFileDownloader {
                                    &uuid.clone().as_bytes().to_vec(),
                                  ]).unwrap();
 
-                self.verify_checksum(uuid, &dfi.checksum)
+                self.verify_checksum(uuid, Some(&dfi.checksum))
             }))
         } else {
             // if the checksum fails, we need to redownload it
@@ -480,7 +472,7 @@ impl FileDownloader for DriveFileDownloader {
                                &uuid.clone().as_bytes().to_vec(),
                              ]).unwrap();
 
-            try!(self.verify_checksum(uuid, &dfi.checksum))
+            try!(self.verify_checksum(uuid, Some(&dfi.checksum)))
         };
 
         println!("shpu;d ne updating");
@@ -488,22 +480,29 @@ impl FileDownloader for DriveFileDownloader {
         Ok(info.size)
     }
 
-    fn create_local_file(&mut self, fd: &FileData, file_path: &Path, metadata_path_str: &Path) -> Result<u64, DriveError> {
-        let fr = match fd.source_data {
-            SourceData::Drive(ref fr) => fr,
-            _ => panic!("fdafasdf")
-        };
+    fn create_local_file(&mut self, parent_uuid: &Uuid, name: &Path) -> Result<Uuid, DriveError> {
+        let parent_path = self.conn.query_row_named("SELECT path FROM files WHERE uuid=:uuid"
+            , &[ (":uuid", &parent_uuid.as_bytes().to_vec()) ]
+            , |row| -> String {
+                row.get(0)
+            }
+        ).unwrap();
+        let file_path = parent_path + &name.to_str().unwrap();
 
-        let mut dotf = try!(File::create(metadata_path_str.clone()));
-        let fcr_string = try!(json::encode(&FileCheckResponse {
-            size: 0,
-            md5Checksum: "d41d8cd98f00b204e9800998ecf8427e".to_string()
-            // seems to be the checksum of an empty file
-        }));
-        try!(dotf.write_all(&fcr_string.into_bytes()));
+        try!(File::create(&file_path));
+        let uuid = Uuid::new_v4();
 
-        try!(File::create(file_path));
-        Ok(0)
+        let id_from_drive = String::new();
+
+        self.conn.execute("INSERT INTO files (id, uuid, path)
+                           VALUES ($1, $2, $3)"
+            , &[ &id_from_drive,
+                 &uuid.clone().as_bytes().to_vec(),
+                 &file_path
+               ]
+        ).unwrap();
+
+        Ok(uuid)
     }
 
     fn read_file(&self, uuid: &Uuid) -> Result<Vec<u8>, DriveError> {
@@ -567,26 +566,56 @@ impl FileDownloader for DriveFileDownloader {
             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
             .send());
 
+        let fcr = try!(self.verify_checksum(&uuid, None));
+        self.conn.execute("UPDATE files
+                           SET checksum=$1, size=$2
+                           WHERE uuid=$3",
+            &[ &fcr.md5Checksum,
+               &(fcr.size as i64),
+               &uuid.clone().as_bytes().to_vec(),
+             ]
+         ).unwrap();
+
         Ok(())
     }
 
-    fn verify_checksum(&self, uuid: &Uuid, checksum: &String) -> Result<FileCheckResponse, DriveError> {
-        let fr = try!(self.uuid_map.get(uuid).ok_or(DriveError {
-            kind: DriveErrorType::FailedUuidLookup,
-            response: None
-        }));
+    fn verify_checksum<'a>(&self, uuid: &Uuid, checksum: Option<&'a str>) -> Result<FileCheckResponse, DriveError> {
+        let (fid, path) = self.conn.query_row_named("SELECT id, path FROM files WHERE uuid=:uuid"
+            , &[( ":uuid", &uuid.clone().as_bytes().to_vec() )]
+            , |row| -> (String, String) {
+                (row.get(0),
+                 row.get(1)
+                )
+            }
+        ).unwrap();
+
+        let checksum: Cow<'a, str> = match checksum {
+            Some(sum) => Cow::Borrowed(sum),
+            None => {
+                let mut fh = try!(File::open(&path));
+                let mut file_string = Vec::<u8>::new();
+                try!(fh.read_to_end(&mut file_string));
+
+                Cow::Owned({
+                    let mut md5 = Md5::new();
+                    md5.input(&file_string);
+                    md5.result_str()
+                })
+            }
+        };
+
         let mut resp = try!(self.client
             .get(&format!(
                 "https://www.googleapis.com/drive/v3/files/{}\
                 ?fields=md5Checksum%2Csize"
-                , fr.id.clone()))
+                , fid.clone()))
             .header(Authorization(Bearer{token: self.auth_data.tr.access_token.clone()}))
             .send());
 
         let mut resp_string = String::new();
         try!(resp.read_to_string(&mut resp_string));
         let fcr: FileCheckResponse = try!(json::decode(&resp_string));
-        let same = checksum == &fcr.md5Checksum;
+        let same = &checksum == &fcr.md5Checksum;
         if !same {
             println!("{} =? {}", checksum, fcr.md5Checksum);
             println!("same?: {:?}", same);

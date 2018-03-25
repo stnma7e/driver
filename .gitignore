@@ -2,3 +2,6 @@ target
 Cargo.lock
 *.swp
 access
+.drive_files
+files.db
+drive.db

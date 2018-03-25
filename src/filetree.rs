@@ -23,26 +23,25 @@ pub struct FileUpdates {
 pub trait FileDownloader {
     fn get_file_list(&mut self, root_folder: &uuid::Uuid) -> Result<FileUpdates, DriveError>;
     fn resolve_error(&mut self, resp_string: &str) -> Result<(), DriveError>;
-    fn verify_checksum(&self, fd: &Uuid, checksum: &String) -> Result<FileCheckResponse, DriveError>;
+    fn verify_checksum(&self, fd: &Uuid, checksum: Option<&str>) -> Result<FileCheckResponse, DriveError>;
     fn retreive_file(&mut self, uuid: &Uuid, parent_uuid: &Uuid) -> Result<u64, DriveError>;
-    fn create_local_file(&mut self, fd: &FileData, file_path: &Path, metadata_path_str: &Path) -> Result<u64, DriveError>;
+    fn create_local_file(&mut self, parent_uuid: &Uuid, file_path: &Path) -> Result<Uuid, DriveError>;
     fn read_file(&self, uuid: &Uuid) -> Result<Vec<u8>, DriveError>;
     fn write_file(&self, uuid: &Uuid, data: &[u8], offset: u64) -> Result<u32, DriveError>;
     fn flush_file(&self, uuid: &Uuid) -> Result<(), DriveError>;
 }
 
-pub struct FileTree<'a, 'b> {
+pub struct FileTree<'b> {
     pub child_map: HashMap<u64, Vec<u64>>,
     pub inode_map: HashMap<u64, FileData>,
     pub parent_map: HashMap<u64, u64>,
     pub current_inode: u64,
-    pub root_folder: &'a str,
 
     pub file_downloader: &'b mut FileDownloader,
     pub conn: rusqlite::Connection,
 }
 
-impl<'a, 'b> FileTree<'a, 'b> {
+impl<'b> FileTree<'b> {
     fn check_for_new_files(&mut self, parent_folder_id: &uuid::Uuid, parent_inode: u64) -> Result<(), DriveError> {
         println!("\n\n\n");
         let updates = try!(

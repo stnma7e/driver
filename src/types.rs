@@ -62,8 +62,8 @@ pub struct FileResponse {
 #[derive (Debug, Clone)]
 pub struct FileData {
     pub id: uuid::Uuid,
-    pub path: PathBuf,
     pub parent_inode: u64,
+    pub path: PathBuf,
     pub attr: FileAttr,
     pub source_data: SourceData,
 }
@@ -123,6 +123,7 @@ pub enum DriveErrorType {
     NoSuchInode,
     NoPathForParent,
     FileNotYetDownloaded,
+    WrongSourceDataType,
 }
 
 #[derive (Debug)]

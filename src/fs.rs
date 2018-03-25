@@ -16,7 +16,7 @@ use uuid::Uuid;
 use filetree::*;
 use types::*;
 
-impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
+impl<'b> Filesystem for FileTree<'b> {
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
         println!("getattr(ino={})", ino);
 
@@ -116,7 +116,20 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
     // implement open flags with file handle later
     fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
         println!("open(ino={})", ino);
-        reply.opened(0, flags)
+
+        let uuid = self.conn.query_row_named("SELECT uuid FROM files WHERE ino=:ino"
+            , &[( ":ino", &(ino as i64) )]
+            , |row| -> Uuid {
+                Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).unwrap()
+            }
+        ).unwrap();
+        match self.file_downloader.verify_checksum(&uuid, None) {
+            Ok(_) => reply.opened(0, flags),
+            Err(err) => {
+                println!("err in validating checksum of local file, err: {:?}", err);
+                reply.error(0)
+            }
+        }
     }
 
     fn forget(&mut self, _req: &Request, _ino: u64, _nlookup: u64) {
@@ -188,15 +201,13 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
         println!("opendir(ino={})", ino);
 
         if ino == 1 {
-            match File::open(self.root_folder) {
+            match File::open("random asas place") {
                 Ok(handle) => {
                     let h = handle.into_raw_fd();
                     reply.opened(h as u64, _flags);
                     return
                 }
-                Err(error) => {
-                    println!("no downloaded folder for root, {}, err: {:?}", self.root_folder, error);
-                }
+                Err(_) => { }
             }
         }
 
@@ -248,25 +259,31 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
             reply.error(ENOENT)
         }
     }
-    fn create(&mut self, _req: &Request, _parent: u64, _name: &Path, _mode: u32, _flags: u32, reply: ReplyCreate) {
-        println!("create(name{:?}, parent={}, mode={}, flags={})", _name, _parent, _mode, _flags);
+    fn create(&mut self, _req: &Request, parent_inode: u64, _name: &Path, _mode: u32, _flags: u32, reply: ReplyCreate) {
+        println!("create(name{:?}, parent={}, mode={}, flags={})", _name, parent_inode, _mode, _flags);
 
-        let inode = self.current_inode;
-        self.current_inode += 1;
+        let inode = self.conn.query_row("SELECT MAX(ino) FROM files"
+            , &[], |row| -> u64 {
+                row.get::<i32, i64>(0) as u64
+            }
+        ).unwrap() + 1;
+        let (parent_uuid, parent_path) = self.conn.query_row_named("SELECT uuid, path FROM files WHERE parent_ino=:parent_ino"
+            , &[ (":parent_ino", &(parent_inode as i64)) ]
+            , |row| -> (Uuid, String) {
+                ( Uuid::from_bytes(&row.get::<i32, Vec<u8>>(0)).unwrap()
+                , row.get(1)
+                )
+            }
+        ).unwrap();
 
-        let uuid =  Uuid::new_v4();
         let ts = time::now().to_timespec();
-        let mut path = {
-            let parent = self.inode_map.get(&_parent)
-                .expect(&format!("no parent for attempted fs creation of file: parent {}, file {:?}", _parent, _name));
-            parent.path.clone()
-        };
-        path.push(_name);
+        let uuid = self.file_downloader.create_local_file(&parent_uuid, _name).unwrap();
 
+        let path = Path::new(&(parent_path + &_name.to_str().unwrap())).to_owned();
         let fd = FileData {
             id: uuid,
+            parent_inode: parent_inode,
             path: path,
-            parent_inode: _parent,
             attr: FileAttr {
                 ino: inode,
                 size: 0,
@@ -286,11 +303,21 @@ impl<'a, 'b> Filesystem for FileTree<'a, 'b> {
             source_data: SourceData::CreatedFile,
         };
 
-        self.child_map.entry(_parent).or_insert(Vec::new())
+        self.child_map.entry(parent_inode).or_insert(Vec::new())
             .push(inode);
         self.inode_map.entry(inode).or_insert(fd.clone());
         self.child_map.entry(inode).or_insert(Vec::new());
-        self.parent_map.entry(inode).or_insert(_parent);
+        self.parent_map.entry(inode).or_insert(parent_inode);
+
+        self.conn.execute("INSERT INTO files (ino, uuid, parent_ino, name, size, kind)
+                           VALUES ($1, $2, $3, $4, $5, $6)"
+           , &[ &(inode as i64),
+                &uuid.clone().as_bytes().to_vec(),
+                &(parent_inode as i64),
+                &(_name.to_str().expect("nilfalsdfs")),
+                &(0 as i64),
+              ]
+        ).unwrap();
 
         reply.created(&ts, &fd.attr, fd.attr.ino, 0, 0)
     }

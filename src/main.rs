@@ -21,11 +21,12 @@ use driver::drive::*;
 
 fn main() {
 //    let root_folder = (vec![], "0B7TtU3YsiIjTTS1oUE5wZFpsYVk");
-    let root_folder_name = ".drive_files";
+    let root_folder_name = ".drive_files2";
     let root_folder_path = Path::new(root_folder_name);
 //    let root_folder_id =  "0B7TtU3YsiIjTWjBOM0YwYkVBa1U";
 //    let root_folder_id =  "0B7TtU3YsiIjTaEd3WlVSMGRERlk";
-    let root_folder_id =  "root";
+//    let root_folder_id =  "root";
+    let root_folder_id = "0B7TtU3YsiIjTeW1vTGc0a1Y1MFE";
     let root_folder_inode = 1;
 //    let root_folder = (vec!["rot".to_string()], "0B7TtU3YsiIjTeHJGR1VKMHB3cWs");
 
@@ -55,7 +56,6 @@ fn main() {
         child_map: HashMap::new(),
         parent_map: HashMap::new(),
         current_inode: last_ino,
-        root_folder: root_folder_name,
         file_downloader: &mut fd,
         conn: conn,
     };
@@ -68,7 +68,8 @@ fn main() {
                         , &"root".to_string()
                         , &(0 as i64)
                         , &"directory"
-                       ]).unwrap_or(0);
+                       ]
+    ).unwrap_or(0);
 
     let ts = time::now().to_timespec();
     ft.inode_map.entry(root_folder_inode).or_insert(FileData {
